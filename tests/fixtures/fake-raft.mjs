@@ -13,6 +13,7 @@ const scenario = process.env.FAKE_RAFT_SCENARIO ?? 'serve'
 const argv = process.argv.slice(2)
 const record = (entry) => { if (log) appendFileSync(log, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) }
 
+process.on('SIGTERM', () => { record({ event: 'sigterm' }); process.exit(0) })
 record({
   argv,
   env: {
@@ -22,7 +23,6 @@ record({
     RAFT_EXPECTED_AGENT_ID: process.env.RAFT_EXPECTED_AGENT_ID,
   },
 })
-process.on('SIGTERM', () => { record({ event: 'sigterm' }); process.exit(0) })
 
 const flag = (name) => { const i = argv.indexOf(name); return i < 0 ? undefined : argv[i + 1] }
 const emit = (value) => { process.stdout.write(`${JSON.stringify(value)}\n`) }

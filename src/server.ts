@@ -6,7 +6,7 @@
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import { validateActivityEvent, type ActivityQueue } from './activity.js'
+import { ACTIVITY_DRAIN_SCHEMA, validateActivityEvent, type ActivityQueue } from './activity.js'
 
 export const WAKE_SCHEMA = 'raft-channel-wake.v1'
 
@@ -153,13 +153,15 @@ export async function startChannelServer(options: ChannelServerOptions): Promise
       return
     }
 
-    if (activity !== undefined && url.pathname === '/activity/drain' && req.method === 'GET') {
+    if (url.pathname === '/activity/drain' && req.method === 'GET') {
       if (!authorized) {
         send(res, 401, { ok: false, error: 'invalid Raft bridge token' })
         return
       }
+      // With activity off the drain stays valid and empty, so the bridge logs
+      // "no_events" instead of a failed drain on every iteration.
       const max = Number(url.searchParams.get('max') ?? '50')
-      send(res, 200, activity.drain(max))
+      send(res, 200, activity === undefined ? { schema: ACTIVITY_DRAIN_SCHEMA, events: [], dropped: 0 } : activity.drain(max))
       return
     }
 
