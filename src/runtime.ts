@@ -39,6 +39,42 @@ const UNFINISHED_TURN_ENDS = new Set(['interrupted', 'aborted', 'error'])
 const monotonicNow = (): number => performance.now()
 
 /**
+ * `raft message check` (or the legacy `slock` alias) as one command of a shell
+ * line: at the start, after a separator, quote, subshell paren or path slash,
+ * with an optional `--profile <slug>` before `message`. Env prefixes such as
+ * `RAFT_PROFILE=x raft message check` and pipes after it match.
+ *
+ * Deliberately loose: the words anywhere after whitespace match too, so
+ * `echo raft message check` or a reply body that quotes the command counts
+ * as a check. A false match only turns check-aware coalescing off for the
+ * rest of that turn (the plugin injects as it would without it); a missed
+ * match could hold back a wake that needed a notice.
+ */
+const RAFT_CHECK = /(^|[;&|(\s/"'`])(raft|slock)(\s+--profile(=|\s+)\S+)?\s+message\s+check\b/
+
+/** Whether one shell command line runs `raft message check`. */
+export function isRaftCheckCommand(command: string): boolean {
+  return RAFT_CHECK.test(command)
+}
+
+/**
+ * Whether a `tool/call`'s raw arguments run `raft message check`: any
+ * top-level string argument (`command`, `cmd`, `script`, … whatever the
+ * shell tool names it) that matches, or the raw text when it is not a JSON
+ * object. Tool names are not checked, for the same reason the pattern is loose.
+ */
+export function isRaftCheckCall(rawArguments: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(rawArguments)
+  } catch {
+    return isRaftCheckCommand(rawArguments)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return isRaftCheckCommand(rawArguments)
+  return Object.values(parsed).some(value => typeof value === 'string' && isRaftCheckCommand(value))
+}
+
+/**
  * Whether a session log ends with acknowledged wake work that never ran to
  * completion: a turn still open (crash or dispose mid-turn), a turn closed as
  * interrupted, aborted or failed, or queued input canceled by a dispose. The
@@ -115,6 +151,14 @@ export class RaftRuntime {
   private disposed = false
   private lastSessionId: string | undefined
   private injecting: { id: MessageId; claimed: boolean } | undefined
+  /**
+   * The running turn that one of our notices started, until it ends, and
+   * whether it has started a `raft message check` call yet. While it has not,
+   * that coming check drains whatever a new wake announces.
+   */
+  private noticeTurn: { sessionId: string; turn: number; checked: boolean } | undefined
+  /** Wake counter for the per-wake debug log. */
+  private wakes = 0
 
   constructor(private readonly options: RuntimeOptions) {}
 
@@ -380,15 +424,52 @@ export class RaftRuntime {
   }
 
   private decide(): Decision {
+    const wake = ++this.wakes
     const live = this.current
     if (live === undefined || this.disposed) return { outcome: this.noSession('no Raft agent session is attached yet') }
-    // An unclaimed notice is still ahead of the model, and its check will
-    // drain whatever this wake announced.
-    if (this.noticePending(live)) return { outcome: { ok: true, runtimeSession: live.id } }
+    const covered = this.coveredBy(live)
+    if (covered !== undefined) {
+      this.trace(wake, `coalesced: ${covered}`)
+      return { outcome: { ok: true, runtimeSession: live.id } }
+    }
     if (this.options.config.debounceMs > 0 && monotonicNow() < this.windowEnd) {
+      this.trace(wake, 'held for the debounce window')
       return { wait: new Promise<WakeOutcome>(resolve => { this.tail.push(resolve); this.armTail() }) }
     }
-    return { outcome: this.injectOutcome(live) }
+    const outcome = this.injectOutcome(live)
+    if (outcome.ok) this.trace(wake, 'injected')
+    return { outcome }
+  }
+
+  /**
+   * Why a wake needs no notice of its own, if it does not:
+   * - an unclaimed notice is still ahead of the model, and its check will
+   *   drain whatever this wake announced;
+   * - a notice-started turn is running and has not started its
+   *   `raft message check` yet: that check drains this wake's message too.
+   *   The bridge's EAB-7 reconciliation re-POSTs a wake while its message is
+   *   still pending server-side, which is exactly this window (between the
+   *   notice starting a turn and the check draining the delivery); injecting
+   *   there made a wasted turn that found "No new inbox messages".
+   * Safety net: if the model never runs the check in that turn, the message
+   * stays pending server-side and the bridge's next reconciliation wakes
+   * again; by then the turn has ended and that wake is injected.
+   */
+  private coveredBy(live: LiveSession): string | undefined {
+    if (this.noticePending(live)) return 'unclaimed notice'
+    if (this.preCheckTurn()) return 'pre-check turn'
+    return undefined
+  }
+
+  /** Whether a notice-started turn of a session we still run has not started its check yet. */
+  private preCheckTurn(): boolean {
+    const turn = this.noticeTurn
+    if (turn === undefined || turn.checked) return false
+    return this.current?.id === turn.sessionId || this.retiring.has(turn.sessionId)
+  }
+
+  private trace(wake: number, what: string): void {
+    this.options.logger.debug(`raft-channel: wake #${wake} ${what}`)
   }
 
   private armTail(): void {
@@ -409,8 +490,18 @@ export class RaftRuntime {
     const live = this.current
     let outcome: WakeOutcome
     if (live === undefined || this.disposed) outcome = this.noSession('no Raft agent session is attached')
-    else if (this.noticePending(live)) outcome = { ok: true, runtimeSession: live.id }
-    else outcome = this.injectOutcome(live)
+    else {
+      const covered = this.coveredBy(live)
+      if (covered !== undefined) {
+        outcome = { ok: true, runtimeSession: live.id }
+        this.options.logger.debug(`raft-channel: ${waiters.length} held wake(s) coalesced: ${covered}`)
+      } else {
+        outcome = this.injectOutcome(live)
+        if (outcome.ok) {
+          this.options.logger.debug(`raft-channel: debounce window closed: 1 held wake injected${waiters.length > 1 ? `, ${waiters.length - 1} coalesced: debounce` : ''}`)
+        }
+      }
+    }
     for (const resolve of waiters) resolve(outcome)
   }
 
@@ -455,9 +546,19 @@ export class RaftRuntime {
     this.pending = { sessionId: live.id, messageId: message.id }
   }
 
-  /** `agent/inbox/claimed` feed: marks a notice claimed during its own followup(). */
-  onClaimed(messageId: MessageId): void {
-    if (this.injecting?.id === messageId) this.injecting.claimed = true
+  /**
+   * `agent/inbox/claimed` feed: marks a notice claimed during its own
+   * followup(), and notes the turn one of our notices starts. Notices are
+   * queued as next-turn input, so they are claimed only at a turn's start.
+   */
+  onClaimed(sessionId: string, messageId: MessageId, turn: number): void {
+    const injecting = this.injecting
+    const ours = injecting?.id === messageId
+    if (ours) injecting!.claimed = true
+    const pending = this.pending
+    if (ours || pending !== undefined && pending.sessionId === sessionId && pending.messageId === messageId) {
+      this.noticeTurn = { sessionId, turn, checked: false }
+    }
   }
 
   /**
@@ -468,11 +569,27 @@ export class RaftRuntime {
     const live = this.current?.id === session.id ? this.current : this.retiring.get(session.id)
     if (live === undefined) return
     live.recorder?.record(event)
+    this.trackCheck(session.id, event)
     if (event.type !== 'turn/end' || live !== this.current || this.disposed) return
     live.turns += 1
     this.serial(async () => { await this.maybeRotate(live) }).catch((error: unknown) => {
       this.options.logger.error(`raft-channel: rotation of ${live.id} failed: ${errorText(error)}; staying on it`)
     })
+  }
+
+  /** Mark the notice-started turn checked at its first `raft message check` call; forget it when it ends. */
+  private trackCheck(sessionId: string, event: SessionEvent): void {
+    const turn = this.noticeTurn
+    if (turn === undefined || turn.sessionId !== sessionId) return
+    if (event.type === 'tool/call') {
+      const data = (event as SessionEvent<'tool/call'>).data
+      if (!turn.checked && data.turn === turn.turn && isRaftCheckCall(data.arguments)) {
+        turn.checked = true
+        this.options.logger.debug(`raft-channel: ${sessionId} turn ${turn.turn} started raft message check`)
+      }
+    } else if (event.type === 'turn/end') {
+      if ((event as SessionEvent<'turn/end'>).data.turn === turn.turn) this.noticeTurn = undefined
+    }
   }
 
   private historyChars(live: LiveSession): number {
@@ -531,6 +648,7 @@ export class RaftRuntime {
     this.options.logger.warn(`raft-channel: agent ${live.id} was disposed externally; re-attaching`)
     this.current = undefined
     this.pending = undefined
+    if (this.noticeTurn?.sessionId === live.id) this.noticeTurn = undefined
     this.scheduleRecover(live)
   }
 

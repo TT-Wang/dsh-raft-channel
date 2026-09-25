@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { WAKE_NOTICE } from '../src/index.js'
-import { FAKE_RAFT, fakeRaftRecords, host, mountChannel, postWake, scratch, until, wakeBody, type Host } from './harness.js'
+import { countClaimedNotices, FAKE_RAFT, fakeRaftRecords, holdRequest, host, mountChannel, postWake, raftCheck, scratch, until, wakeBody, type Host } from './harness.js'
 
 const AGENT_ID = 'agent-1'
 
@@ -87,20 +87,19 @@ describe('persistent Raft session', () => {
 
   it('a wake queued while the rotating turn runs is delivered in one of the two sessions', async () => {
     const { h, channel, token, url } = await boot({ rotate: { maxTurns: 1 } })
-    let release!: () => void
-    h.adapter.gate = new Promise<void>(resolve => { release = resolve })
+    const claimed = countClaimedNotices(h, WAKE_NOTICE)
+    // Turn 1 has started its check, so wake 2 needs (and gets) its own notice.
+    h.adapter.queue.push(raftCheck('check-1'))
+    const release = holdRequest(h, 2)
     expect((await postWake(url, token, wakeBody(1))).body.ok).toBe(true)
-    await until(() => h.adapter.requests.length === 1, 5000, 'turn 1 in flight')
+    await until(() => h.adapter.requests.length === 2, 5000, 'turn 1 in flight after its check')
     const queued = await postWake(url, token, wakeBody(2))
     expect(queued.body).toEqual({ ok: true, runtimeSession: 'raft-p-1' })
-    h.adapter.gate = undefined
     release()
     await until(() => channel.status().runtimeSession === 'raft-p-2', 5000, 'rotation')
-    await until(() => h.adapter.requests.length === 2, 5000, 'second notice handled')
+    await until(() => h.adapter.requests.length === 3, 5000, 'second notice handled')
     await h.ctx.agents.get('raft-p-2' as never)?.whenIdle()
-    const total = h.adapter.requests.filter(request => request.messages.some(message => message.role === 'user'
-      && message.content.some(block => block.type === 'text' && block.text === WAKE_NOTICE))).length
-    expect(total).toBe(2)
+    expect(claimed()).toBe(2)
   })
 
   it('rotates on serialized history size', async () => {

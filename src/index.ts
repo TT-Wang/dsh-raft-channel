@@ -31,6 +31,7 @@ export { startChannelServer, validateWakeBody, WAKE_SCHEMA } from './server.js'
 export type { WakeOutcome, FailureClass } from './server.js'
 export { readState, writeState, STATE_SCHEMA } from './state.js'
 export { AgentPresetError, recordedPreset, SHELL_TOOLS } from './presets.js'
+export { isRaftCheckCall, isRaftCheckCommand } from './runtime.js'
 export type { AgentPresetsView, WorkspaceRegistryView } from './presets.js'
 export type { ChannelState } from './state.js'
 
@@ -98,7 +99,7 @@ export class RaftChannel extends Service {
         logger.warn(`raft-channel: session event handling failed: ${errorText(error)}`)
       }
     })
-    ctx.on('agent/inbox/claimed', ({ message }) => { this.runtime.onClaimed(message.id) })
+    ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => { this.runtime.onClaimed(agent.session.id, message.id, turn) })
     ctx.on('agent/disposed', ({ agent }) => { this.runtime.onAgentDisposed(agent) })
 
     let disposed = false

@@ -50,10 +50,19 @@ export function toolCall(id: string, name: string, args: object): StreamChunk[] 
   ]
 }
 
-/** Scripted adapter: queued responses, then a default text reply; an optional gate holds every request. */
+/** The scripted model running `raft message check` through the fixture `bash` tool. */
+export function raftCheck(id: string, command = 'raft message check'): StreamChunk[] {
+  return toolCall(id, 'bash', { command })
+}
+
+/**
+ * Scripted adapter: queued responses, then a default text reply; an optional
+ * gate holds every request, `holds` holds one request (1-based number).
+ */
 export class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
   readonly queue: StreamChunk[][] = []
+  readonly holds = new Map<number, Promise<void>>()
   gate: Promise<void> | undefined
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -62,6 +71,8 @@ export class ScriptedAdapter extends LlmAdapter {
 
   async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(request)
+    const hold = this.holds.get(this.requests.length)
+    if (hold !== undefined) await hold
     if (this.gate !== undefined) await this.gate
     for (const chunk of this.queue.shift() ?? text('checked Raft')) yield chunk
   }
@@ -140,6 +151,22 @@ export async function host(options: HostOptions = {}) {
 }
 
 export type Host = Awaited<ReturnType<typeof host>>
+
+/** Hold the `n`th model request (1-based) until the returned release is called. */
+export function holdRequest(h: Host, n: number): () => void {
+  let release!: () => void
+  h.adapter.holds.set(n, new Promise<void>(resolve => { release = resolve }))
+  return () => release()
+}
+
+/** Count wake notices claimed by a turn, in any session, from now on. */
+export function countClaimedNotices(h: Host, notice: string): () => number {
+  let count = 0
+  h.ctx.on('agent/inbox/claimed', ({ message }) => {
+    if (message.content.some(block => block.type === 'text' && block.text === notice)) count += 1
+  })
+  return () => count
+}
 
 /** Tool names an Agent's model requests carry. */
 export function agentTools(h: Host, sessionId: string): string[] {

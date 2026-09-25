@@ -8,6 +8,15 @@ import type { BridgeLogger } from './bridge.js';
 import type { WakeOutcome } from './server.js';
 /** Placement of the orientation: after the deployment persona body, before its suffix (10200). */
 export declare const ORIENTATION_ORDER = 10100;
+/** Whether one shell command line runs `raft message check`. */
+export declare function isRaftCheckCommand(command: string): boolean;
+/**
+ * Whether a `tool/call`'s raw arguments run `raft message check`: any
+ * top-level string argument (`command`, `cmd`, `script`, … whatever the
+ * shell tool names it) that matches, or the raw text when it is not a JSON
+ * object. Tool names are not checked, for the same reason the pattern is loose.
+ */
+export declare function isRaftCheckCall(rawArguments: string): boolean;
 /**
  * Whether a session log ends with acknowledged wake work that never ran to
  * completion: a turn still open (crash or dispose mid-turn), a turn closed as
@@ -38,6 +47,14 @@ export declare class RaftRuntime {
     private disposed;
     private lastSessionId;
     private injecting;
+    /**
+     * The running turn that one of our notices started, until it ends, and
+     * whether it has started a `raft message check` call yet. While it has not,
+     * that coming check drains whatever a new wake announces.
+     */
+    private noticeTurn;
+    /** Wake counter for the per-wake debug log. */
+    private wakes;
     constructor(options: RuntimeOptions);
     /** The current session id, reported to the bridge as `runtimeSession`. */
     runtimeSession(): string | undefined;
@@ -80,6 +97,24 @@ export declare class RaftRuntime {
     wake(): Promise<WakeOutcome>;
     private noSession;
     private decide;
+    /**
+     * Why a wake needs no notice of its own, if it does not:
+     * - an unclaimed notice is still ahead of the model, and its check will
+     *   drain whatever this wake announced;
+     * - a notice-started turn is running and has not started its
+     *   `raft message check` yet: that check drains this wake's message too.
+     *   The bridge's EAB-7 reconciliation re-POSTs a wake while its message is
+     *   still pending server-side, which is exactly this window (between the
+     *   notice starting a turn and the check draining the delivery); injecting
+     *   there made a wasted turn that found "No new inbox messages".
+     * Safety net: if the model never runs the check in that turn, the message
+     * stays pending server-side and the bridge's next reconciliation wakes
+     * again; by then the turn has ended and that wake is injected.
+     */
+    private coveredBy;
+    /** Whether a notice-started turn of a session we still run has not started its check yet. */
+    private preCheckTurn;
+    private trace;
     private armTail;
     /** Window close: one merged notice for every wake that arrived inside it. */
     private flushTail;
@@ -92,13 +127,19 @@ export declare class RaftRuntime {
      * @throws when the agent is gone or the inbox did not accept the message.
      */
     private inject;
-    /** `agent/inbox/claimed` feed: marks a notice claimed during its own followup(). */
-    onClaimed(messageId: MessageId): void;
+    /**
+     * `agent/inbox/claimed` feed: marks a notice claimed during its own
+     * followup(), and notes the turn one of our notices starts. Notices are
+     * queued as next-turn input, so they are claimed only at a turn's start.
+     */
+    onClaimed(sessionId: string, messageId: MessageId, turn: number): void;
     /**
      * Observe one appended session event of any session; ours feed activity and,
      * for the current session, turn counting and rotation.
      */
     onSessionEvent(session: Session, event: SessionEvent): void;
+    /** Mark the notice-started turn checked at its first `raft message check` call; forget it when it ends. */
+    private trackCheck;
     private historyChars;
     private maybeRotate;
     private retire;

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { WAKE_NOTICE, orientationText } from '../src/index.js'
-import { FAKE_RAFT, fakeRaftRecords, host, mountChannel, postWake, scratch, text, toolCall, until, wakeBody, type Host } from './harness.js'
+import { FAKE_RAFT, fakeRaftRecords, holdRequest, host, mountChannel, postWake, raftCheck, scratch, text, toolCall, until, wakeBody, type Host } from './harness.js'
 
 const AGENT_ID = '00000000-0000-4000-8000-000000000001'
 const SESSION = 'raft-test-profile-1'
@@ -95,15 +95,19 @@ describe('wake endpoint against a real agent loop', () => {
   })
 
   it('pin 4: a burst of wakes while the agent is busy injects fewer notices, and every POST is answered', async () => {
-    const release = gate(h)
+    // The first turn has already started its check when the burst arrives, so
+    // the burst needs a notice of its own (a pre-check burst would be covered
+    // by that check; see coalesce.spec.ts).
+    h.adapter.queue.push(raftCheck('check-1'))
+    const release = holdRequest(h, 2)
     const { token, url } = await mount()
     const first = await postWake(url, token)
     expect(first.body.ok).toBe(true)
-    await until(() => h.adapter.requests.length === 1, 5000, 'first turn in flight')
+    await until(() => h.adapter.requests.length === 2, 5000, 'first turn in flight after its check')
     const burst = await Promise.all(Array.from({ length: 12 }, (_, n) => postWake(url, token, wakeBody(n + 2))))
     for (const answer of burst) expect(answer).toEqual({ status: 200, body: { ok: true, runtimeSession: SESSION } })
     release()
-    await until(() => h.ctx.agents.get(SESSION as never)!.status === 'idle' && h.adapter.requests.length >= 2, 5000, 'turns')
+    await until(() => h.ctx.agents.get(SESSION as never)!.status === 'idle' && h.adapter.requests.length >= 3, 5000, 'turns')
     await h.ctx.agents.get(SESSION as never)!.whenIdle()
     const notices = userMessages(h)
     expect(notices.length).toBeLessThan(13)

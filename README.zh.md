@@ -45,7 +45,7 @@ dsh --profile <name>
 - 唤醒提示固定为下面这一行，不带任何 id、时间或计数：
   `[Raft wake] New Raft activity is waiting. Run \`raft message check\` now to read it, then handle it as your Raft instructions describe.`
 - 只有提示已经进入 agent 收件箱（仍在排队，或已被某个 turn 领取），`POST /wake` 才返回 `2xx {ok:true, runtimeSession}`。token 不对返回 401；请求里带内容类字段返回 400。
-- 合并唤醒：上一条提示还没被领取时，新唤醒只回复确认、不再注入；窗口期（`debounceMs`）内到达的唤醒，在窗口结束时合并成一条提示。窗口用单调时钟计时，系统时间回拨不会拉长它。
+- 合并唤醒：一次 `raft message check` 会取走该 agent 所有待处理消息。因此在两种情况下，新唤醒只回复确认、不再注入：上一条提示还没被领取；或者由我们的提示开启的那一轮正在运行，而且还没开始调用 `raft message check`。bridge 的对账会在消息仍挂在服务端时重发唤醒，正好落在“提示开启一轮”到“check 取走消息”之间的几秒里；以前每次重发都会多跑一轮，结果只看到 "No new inbox messages"。判断 check 的方式：工具调用的任一顶层字符串参数（shell 工具的 `command`）里以命令形式出现 `raft message check` 或 `slock message check`，允许 `--profile <slug>`、`RAFT_PROFILE=x` 之类的环境变量前缀和后接管道。匹配故意放宽（`echo raft message check` 也算）：误判只会让这一轮余下时间按“已 check”处理，唤醒照常注入。check 已开始、这一轮已结束、或这一轮不是由提示开启时，按原规则处理。如果模型在提示开启的一轮里始终没跑 check，消息仍挂在服务端，bridge 下一次对账会再唤醒，那时就会注入。没有 check 能覆盖时，第一条唤醒立即注入；窗口期（`debounceMs`）内随后到达的唤醒，在窗口结束时合并成一条提示。窗口用单调时钟计时，系统时间回拨不会拉长它。每条唤醒的判定都记在 debug 日志里。
 - 已确认的唤醒不会因停止而丢失：挂上会话时（启动或外部 dispose 后重新挂载）会检查日志，末尾若是未结束的 turn、以 interrupted/aborted/error 结束的 turn，或被 dispose 取消的排队提示，就立即补发一条提示。
 - 状态文件 `<DSH_HOME>/raft-channel/<profile>.json` 以原子方式写入，重启后按它恢复同一个会话。某个 turn 结束时，若轮数或历史长度超过阈值，就切换到 `<prefix>-<n+1>`。尚未被领取的提示会随之迁到新会话，旧会话仍可恢复。
 - bridge 的启动参数带 `--runtime-session` 和 `--expected-agent`，token 只通过环境变量 `RAFT_CHANNEL_TOKEN` 传给子进程。子进程退出后按指数退避重启。CLI 对所有非 5xx 错误都会发 `bridge_fatal`（包括 429 这类暂时性拒绝），这种情况照样退避重启。只有鉴权被撤销（401/403）或配置、身份类错误码（如 `BRIDGE_IDENTITY_MISMATCH`、`PROFILE_FILE_INVALID`）才会永久停止重启，并写错误日志。

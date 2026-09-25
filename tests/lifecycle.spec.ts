@@ -9,7 +9,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { WAKE_NOTICE } from '../src/index.js'
 import type { RaftRuntime } from '../src/runtime.js'
 import { needsRewake } from '../src/runtime.js'
-import { FAKE_RAFT, fakeRaftRecords, host, mountChannel, postWake, scratch, until, wakeBody, type Host } from './harness.js'
+import { FAKE_RAFT, fakeRaftRecords, holdRequest, host, mountChannel, postWake, raftCheck, scratch, until, wakeBody, type Host } from './harness.js'
 
 const AGENT_ID = 'agent-1'
 
@@ -63,9 +63,11 @@ describe('session lifecycle', () => {
 
   it('a wake answered 2xx before a dispose mid-turn is re-delivered after restart (no new wake needed)', async () => {
     const first = await boot()
-    const release = hold(first.h)
+    // Turn 1 has started its check, so wake 2 gets a notice of its own.
+    first.h.adapter.queue.push(raftCheck('check-1'))
+    const release = holdRequest(first.h, 2)
     expect((await postWake(first.url, first.token, wakeBody(1))).body.ok).toBe(true)
-    await until(() => first.h.adapter.requests.length === 1, 5000, 'turn 1 in flight')
+    await until(() => first.h.adapter.requests.length === 2, 5000, 'turn 1 in flight after its check')
     // Queued behind the running turn and acknowledged to the bridge.
     expect((await postWake(first.url, first.token, wakeBody(2))).body).toEqual({ ok: true, runtimeSession: 'raft-p-1' })
     expect(first.h.ctx.agents.get('raft-p-1' as never)!.inbox.nextTurn).toHaveLength(1)

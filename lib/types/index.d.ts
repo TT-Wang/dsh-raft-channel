@@ -12,6 +12,7 @@ export { startChannelServer, validateWakeBody, WAKE_SCHEMA } from './server.js';
 export type { WakeOutcome, FailureClass } from './server.js';
 export { readState, writeState, STATE_SCHEMA } from './state.js';
 export { AgentPresetError, recordedPreset, SHELL_TOOLS } from './presets.js';
+export { isRaftCheckCall, isRaftCheckCommand } from './runtime.js';
 export type { AgentPresetsView, WorkspaceRegistryView } from './presets.js';
 export type { ChannelState } from './state.js';
 declare module '@deepseek-ai/cordis' {
