@@ -55,6 +55,8 @@ describe('search output parsing (captured from CLI 0.0.26)', () => {
   })
 
   it('maps channel and channel-thread sources to reply targets, and refuses DM sources', () => {
+    expect(sourceTarget('channel:研发')).toBe('#研发')
+    expect(sourceTarget('thread:研发:0ffb9edf')).toBe('#研发:0ffb9edf')
     expect(sourceTarget('channel:all')).toBe('#all')
     expect(sourceTarget('thread:all:0ffb9edf')).toBe('#all:0ffb9edf')
     expect(sourceTarget('dm:slicey-dsh')).toBeUndefined()
@@ -69,11 +71,15 @@ describe('search output parsing (captured from CLI 0.0.26)', () => {
     expect(mentionsHandle('hi,@slicey-dsh see this', 'slicey-dsh')).toBe(true)
     expect(mentionsHandle('ping user:slicey-dsh-2', 'slicey-dsh')).toBe(false)
     expect(mentionsHandle('open dm:user:slicey-dsh', 'slicey-dsh')).toBe(false)
+    // The CLI rewrites only ASCII `@name`; a Unicode handle stays `@name`.
+    expect(mentionsHandle('<match>@小助手</match> 看一下', '小助手')).toBe(true)
+    expect(mentionsHandle('@小助手二号 看一下', '小助手')).toBe(false)
   })
 
   it('reads the handle from `raft profile show --json`', () => {
     const json = JSON.stringify({ ok: true, data: { kind: 'agent', id: '00000000', isSelf: true, name: 'slicey-dsh', displayName: 'Slicey', description: null } })
     expect(parseProfile(json)).toEqual({ handle: 'slicey-dsh', displayName: 'Slicey' })
+    expect(parseProfile(JSON.stringify({ ok: true, data: { name: '小助手', displayName: '' } }))).toEqual({ handle: '小助手', displayName: '小助手' })
     expect(() => parseProfile(JSON.stringify({ ok: false }))).toThrow(/usable handle/)
   })
 
@@ -112,6 +118,14 @@ describe('mention notice and orientation', () => {
     expect(text).toContain('if the read shows you already replied after a message, do not answer it again.')
     expect(orientationText('p')).toBe(text)
     expect(orientationText('q').replaceAll('Raft profile q;', 'Raft profile p;')).toBe(text)
+  })
+
+  it('orientation: an empty first check ends a wake turn only when no mention notice came with it', () => {
+    const text = orientationText('p')
+    // A #all mention can reach the wake hint but not check (another replica's
+    // memory): wake + mention in one turn must still handle the mention.
+    expect(text).toContain('If the first check already prints that, the wake was handled earlier: end the turn without running anything else, unless a "[Raft mention]" notice came with it.')
+    expect(text).toContain('On each "[Raft mention]" notice, with or without a wake: it names messages that check may never return. Read each one with the command it gives, then follow rules 2 to 4 for each that still needs an answer.')
   })
 })
 
@@ -380,6 +394,111 @@ describe('mention sweep against a real agent loop', () => {
     expect(targets.slice(-2)).toEqual(['#dev', '#all:0ffb9edf'])
   })
 
+  it('holds a new mention back while a wake notice waits unclaimed, then reports it once check work is done', async () => {
+    const channel = await mount()
+    const runtime = (channel as unknown as { runtime: { wake(): Promise<{ ok: boolean }> } }).runtime
+    const release = holdRequest(h, 1)
+    agent().followup(createUserMessage({ content: [{ type: 'text', text: 'operator question' }], source: { kind: 'user' } }))
+    await until(() => h.adapter.requests.length === 1, 5000, 'operator turn in flight')
+    expect(await runtime.wake()).toMatchObject({ ok: true })
+    setSpec({ results: [inAll('defe0001', MINUTE)] })
+    // The wake's check may deliver this mention: no notice yet, nothing marked seen.
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 0, deferred: 1 })
+    expect(agent().inbox.nextTurn.map(message => message.content.map(block => block.type === 'text' ? block.text : '').join(''))).toEqual([WAKE_NOTICE])
+    release()
+    await until(() => h.adapter.requests.length === 2, 5000, 'wake turn')
+    await agent().whenIdle()
+    // The wake turn ended without check returning it (the #all case): now it is reported.
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 1 })
+    await agent().whenIdle()
+    expect(mentionTexts(h)).toEqual([expect.stringContaining('#all message defe0001.')])
+  })
+
+  it('leaves mentions younger than the grace period for a later sweep', async () => {
+    const channel = await mount()
+    setSpec({ results: [inAll('0e0e0001', 5_000)] })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 0 })
+    expect(channel.status().mentionSweep!.seen).toBe(0)
+    // Not past the watermark either: a later sweep still finds it.
+    setSpec({ results: [inAll('0e0e0001', MINUTE)] })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 1 })
+  })
+
+  it('a mention notice unclaimed at shutdown is queued again after a restart', async () => {
+    await h.ctx.fiber.dispose()
+    h = await host({ persistenceRoot: join(home, 'sessions') })
+    const channel = await mount()
+    let release!: () => void
+    h.adapter.gate = new Promise<void>(resolve => { release = resolve })
+    const live = agent()
+    live.followup(createUserMessage({ content: [{ type: 'text', text: 'operator question' }], source: { kind: 'user' } }))
+    await until(() => h.adapter.requests.length === 1, 5000, 'operator turn in flight')
+    setSpec({ results: [inAll('1ef70001', MINUTE)] })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 1 })
+    expect(channel.status().mentionSweep!.unclaimed).toBe(1)
+    // Stop the plugin with the notice still queued: the dispose cancels it.
+    const disposing = h.ctx.fiber.dispose()
+    await until(() => {
+      try {
+        return live.inbox.nextTurn.length === 0
+      } catch {
+        return true // already disposed
+      }
+    }, 5000, 'queued notice canceled')
+    h.adapter.gate = undefined
+    release()
+    await disposing
+    const file = join(home, 'raft-channel', `${PROFILE}-mentions.json`)
+    expect((JSON.parse(readFileSync(file, 'utf8')) as { unclaimed: Array<{ shortId: string }> }).unclaimed.map(entry => entry.shortId)).toEqual(['1ef70001'])
+
+    setSpec({ results: [] })
+    h = await host({ persistenceRoot: join(home, 'sessions') })
+    const { channel: again } = await mountChannel(h, { profile: PROFILE, raftBin: FAKE_RAFT, bridge: { enabled: false } })
+    await until(() => mentionTexts(h, again.status().runtimeSession).length === 1, 5000, 're-queued mention notice')
+    const session = again.status().runtimeSession!
+    await h.ctx.agents.get(session as never)!.whenIdle()
+    expect(mentionTexts(h, session)).toEqual([expect.stringContaining('#all message 1ef70001.')])
+    await until(() => again.status().mentionSweep!.unclaimed === 0, 5000, 'claim recorded')
+    expect(await again.sweepMentions()).toMatchObject({ ok: true, notified: 0 })
+  })
+
+  it('reports mentions in channels with Unicode names, and warns about a source it cannot map', async () => {
+    const channel = await mount()
+    setSpec({
+      results: [
+        { ...inAll('7e570001', MINUTE), channelName: '研发' },
+        { ...inAll('7e570002', MINUTE), channelName: 'odd name' },
+      ],
+    })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 1 })
+    await agent().whenIdle()
+    expect(mentionTexts(h)).toEqual([expect.stringContaining(': #研发 message 7e570001. Read it with `raft message read --target "#研发" --around 7e570001`')])
+    expect(h.logs.filter(line => line.type === 'warn' && line.text.includes('cannot map source "channel:odd name" of message 7e570002'))).toHaveLength(1)
+  })
+
+  it('pages past a full first page instead of skipping older mentions', async () => {
+    const channel = await mount()
+    const many = Array.from({ length: 60 }, (_, i) => inAll(`pa9e${String(i).padStart(4, '0')}`, 2 * MINUTE + i * 1000))
+    setSpec({ results: many })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 60 })
+    const searches = sweepCalls().filter(call => call.argv[1] === 'search')
+    expect(searches.at(-2)!.argv).not.toContain('--offset')
+    expect(searches.at(-1)!.argv.slice(-2)).toEqual(['--offset', '50'])
+    expect(h.logs.some(line => line.text.includes('full pages'))).toBe(false)
+    await agent().whenIdle()
+    expect(mentionTexts(h)).toEqual([expect.stringContaining('+55 more')])
+  })
+
+  it('a first page filled by the server\'s any-term fallback ends paging without a warning', async () => {
+    const channel = await mount()
+    // No message has both words of "@test-profile": the server returns any-term hits on page one only.
+    setSpec({ results: Array.from({ length: 50 }, (_, i) => inAll(`a11e${String(i).padStart(4, '0')}`, 2 * MINUTE + i * 1000, 'the profile page changed')) })
+    expect(await channel.sweepMentions()).toEqual({ ok: true, notified: 0 })
+    const searches = sweepCalls().filter(call => call.argv[1] === 'search')
+    expect(searches.at(-1)!.argv.slice(-2)).toEqual(['--offset', '50'])
+    expect(h.logs.some(line => line.type === 'warn' && line.text.includes('mention sweep'))).toBe(false)
+  })
+
   it('is off with sweep.enabled false', async () => {
     const { channel } = await mountChannel(h, { profile: PROFILE, raftBin: FAKE_RAFT, bridge: { enabled: false }, sweep: { enabled: false } })
     expect(await channel.sweepMentions()).toEqual({ ok: false, notified: 0, error: 'disabled' })
@@ -442,5 +561,98 @@ describe('MentionSweeper', () => {
     expect(await sweeper.sweep()).toEqual({ ok: true, notified: 0 })
     expect(calls).toEqual([1, 1])
     await sweeper.stop()
+  })
+
+  function sweeperFor(home: string, spec: string, extra: Partial<ConstructorParameters<typeof MentionSweeper>[0]> = {}) {
+    const logs: string[] = []
+    const notified: Mention[][] = []
+    const sweeper = new MentionSweeper({
+      command: FAKE_RAFT,
+      profile: PROFILE,
+      file: join(home, 'mentions.json'),
+      intervalMs: 60_000,
+      lookbackMs: 15 * MINUTE,
+      targets: undefined,
+      logger: { debug() {}, info() {}, warn: (...args: unknown[]) => { logs.push(args.join(' ')) }, error: (...args: unknown[]) => { logs.push(args.join(' ')) } },
+      notify: async mentions => { notified.push(mentions); return true },
+      env: { ...process.env, FAKE_RAFT_SWEEP: spec },
+      ...extra,
+    })
+    return { sweeper, logs, notified }
+  }
+
+  it('grace: a mention is reported only once it is older than the grace period', async () => {
+    const home = scratch('sweeper')
+    const spec = join(home, 'sweep.json')
+    writeFileSync(spec, JSON.stringify({ results: [inAll('9ace0001', 10_000)] }))
+    let skew = 0
+    const { sweeper, notified } = sweeperFor(home, spec, { now: () => Date.now() + skew })
+    expect(await sweeper.sweep()).toEqual({ ok: true, notified: 0 })
+    skew = 25_000
+    expect(await sweeper.sweep()).toEqual({ ok: true, notified: 1 })
+    expect(notified.flat().map(mention => mention.shortId)).toEqual(['9ace0001'])
+    await sweeper.stop()
+  })
+
+  it('busy: new mentions wait while check work is pending, but not past the deferral cap', async () => {
+    const home = scratch('sweeper')
+    const spec = join(home, 'sweep.json')
+    writeFileSync(spec, JSON.stringify({ results: [inAll('b0550001', MINUTE)] }))
+    let busy: string | undefined = 'a raft message check call in flight'
+    const { sweeper, notified } = sweeperFor(home, spec, { busy: () => busy })
+    expect(await sweeper.sweep()).toEqual({ ok: true, notified: 0, deferred: 1 })
+    busy = undefined
+    expect(await sweeper.sweep()).toEqual({ ok: true, notified: 1 })
+    writeFileSync(spec, JSON.stringify({ results: [inAll('b0550002', 6 * MINUTE)] }))
+    busy = 'an unclaimed wake notice'
+    const capped = sweeperFor(home, spec, { busy: () => busy })
+    expect(await capped.sweeper.sweep()).toEqual({ ok: true, notified: 1 })
+    expect(notified.flat().concat(capped.notified.flat()).map(mention => mention.shortId)).toEqual(['b0550001', 'b0550002'])
+    await sweeper.stop()
+    await capped.sweeper.stop()
+  })
+
+  it('a notified mention no turn claimed is queued again by the next process, until claimed', async () => {
+    const home = scratch('sweeper')
+    const spec = join(home, 'sweep.json')
+    writeFileSync(spec, JSON.stringify({ results: [inAll('c1a10001', MINUTE)] }))
+    const first = sweeperFor(home, spec)
+    expect(await first.sweeper.sweep()).toEqual({ ok: true, notified: 1 })
+    await first.sweeper.stop()
+    // Restart with the notice lost (never claimed); search no longer returns it.
+    writeFileSync(spec, JSON.stringify({ results: [] }))
+    const second = sweeperFor(home, spec)
+    expect(await second.sweeper.sweep()).toEqual({ ok: true, notified: 1 })
+    expect(second.notified[0]!.map(mention => [mention.target, mention.shortId])).toEqual([['#all', 'c1a10001']])
+    second.sweeper.markClaimed([{ target: '#all', shortId: 'c1a10001' }])
+    await second.sweeper.stop()
+    const third = sweeperFor(home, spec)
+    expect(await third.sweeper.sweep()).toEqual({ ok: true, notified: 0 })
+    expect(third.sweeper.status().unclaimed).toBe(0)
+    await third.sweeper.stop()
+  })
+
+  it('stops paging at the page cap with a warning', async () => {
+    const home = scratch('sweeper')
+    const spec = join(home, 'sweep.json')
+    writeFileSync(spec, JSON.stringify({ results: Array.from({ length: 101 }, (_, i) => inAll(`ca9a${String(i).padStart(4, '0')}`, MINUTE + i * 1000)) }))
+    const { sweeper, notified, logs } = sweeperFor(home, spec, { maxPages: 2 })
+    expect(await sweeper.sweep()).toEqual({ ok: true, notified: 100 })
+    expect(notified[0]!.map(mention => mention.shortId)).not.toContain('ca9a0100')
+    expect(logs.filter(line => line.includes('read 2 full pages (100 results); mentions sent before'))).toHaveLength(1)
+    await sweeper.stop()
+  })
+
+  it('start() during a running sweep still schedules the periodic sweep', async () => {
+    const home = scratch('sweeper')
+    const spec = join(home, 'sweep.json')
+    writeFileSync(spec, JSON.stringify({ search: 'hang' }))
+    const { sweeper } = sweeperFor(home, spec, { timeoutMs: 300 })
+    const early = sweeper.sweep()
+    sweeper.start()
+    expect(await early).toMatchObject({ ok: false })
+    await until(() => sweeper.status().runs === 2 && sweeper.status().scheduled, 5000, 'startup sweep and schedule')
+    await sweeper.stop()
+    expect(sweeper.status().scheduled).toBe(false)
   })
 })

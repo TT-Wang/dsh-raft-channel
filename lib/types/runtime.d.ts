@@ -34,6 +34,8 @@ export interface RuntimeOptions {
     secrets: () => readonly string[];
     /** Output of each `raft message check` tool call the agent ran (for the mention sweep). */
     onCheckOutput?: (text: string) => void;
+    /** A turn claimed the mention notice naming these mentions (for the mention sweep). */
+    onMentionsClaimed?: (mentions: readonly MentionRef[]) => void;
 }
 export declare class RaftRuntime {
     private readonly options;
@@ -145,6 +147,15 @@ export declare class RaftRuntime {
      */
     mention(mentions: readonly MentionRef[], handle: string): Promise<boolean>;
     private injectMention;
+    private mentionsClaimed;
+    /**
+     * Why a `raft message check` of the agent may still deliver messages that
+     * reached Raft by now, if it may: a wake notice waits unclaimed, a
+     * notice-started turn has not run its check yet, or a check call has not
+     * returned. The mention sweep holds new mentions back meanwhile, so a
+     * mention the normal path is about to deliver gets no second notice.
+     */
+    checkWork(): string | undefined;
     /**
      * `agent/inbox/claimed` feed: marks a notice claimed during its own
      * followup(), and notes the turn one of our notices starts. Notices are

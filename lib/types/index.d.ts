@@ -6,7 +6,7 @@ export type { Config, ResolvedConfig } from './config.js';
 export { RaftChannelConfigError, resolveConfig } from './config.js';
 export { WAKE_NOTICE, orientationText, ORIENTATION_SECTION, mentionNotice, MENTION_NOTICE_LIST } from './text.js';
 export type { MentionRef } from './text.js';
-export { MentionSweeper, MENTIONS_SCHEMA, SEEN_CAP, CLI_TIMEOUT_MS, checkShortIds, mentionsHandle, parseProfile, parseSearchOutput, parseSearchTime, sourceTarget, } from './mentions.js';
+export { MentionSweeper, MENTIONS_SCHEMA, SEEN_CAP, CLI_TIMEOUT_MS, MENTION_GRACE_MS, MAX_DEFER_MS, MAX_SEARCH_PAGES, checkShortIds, mentionsHandle, parseProfile, parseSearchOutput, parseSearchTime, sourceTarget, } from './mentions.js';
 export type { Mention, SearchResult, SelfProfile, SweepOutcome, SweeperOptions } from './mentions.js';
 export { ActivityQueue, ActivityRecorder, capContent, redactCredentials, validateActivityEvent, CONTENT_CAP } from './activity.js';
 export type { ActivityEvent, DrainResult } from './activity.js';
@@ -37,6 +37,8 @@ export interface RaftChannelStatus {
     mentionSweep?: {
         runs: number;
         seen: number;
+        unclaimed: number;
+        scheduled: boolean;
         lastError?: string;
     };
     error?: string;

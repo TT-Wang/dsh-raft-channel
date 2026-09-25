@@ -28,7 +28,7 @@ export { RaftChannelConfigError, resolveConfig } from './config.js'
 export { WAKE_NOTICE, orientationText, ORIENTATION_SECTION, mentionNotice, MENTION_NOTICE_LIST } from './text.js'
 export type { MentionRef } from './text.js'
 export {
-  MentionSweeper, MENTIONS_SCHEMA, SEEN_CAP, CLI_TIMEOUT_MS, checkShortIds, mentionsHandle, parseProfile, parseSearchOutput, parseSearchTime, sourceTarget,
+  MentionSweeper, MENTIONS_SCHEMA, SEEN_CAP, CLI_TIMEOUT_MS, MENTION_GRACE_MS, MAX_DEFER_MS, MAX_SEARCH_PAGES, checkShortIds, mentionsHandle, parseProfile, parseSearchOutput, parseSearchTime, sourceTarget,
 } from './mentions.js'
 export type { Mention, SearchResult, SelfProfile, SweepOutcome, SweeperOptions } from './mentions.js'
 export { ActivityQueue, ActivityRecorder, capContent, redactCredentials, validateActivityEvent, CONTENT_CAP } from './activity.js'
@@ -59,7 +59,7 @@ export interface RaftChannelStatus {
   turns: number
   bridge?: BridgeStatus
   activityQueued?: number
-  mentionSweep?: { runs: number; seen: number; lastError?: string }
+  mentionSweep?: { runs: number; seen: number; unclaimed: number; scheduled: boolean; lastError?: string }
   error?: string
 }
 
@@ -99,6 +99,7 @@ export class RaftChannel extends Service {
       activity: this.activity,
       secrets: () => [token],
       onCheckOutput: text => { this.sweeper?.markChecked(checkShortIds(text)) },
+      onMentionsClaimed: mentions => { this.sweeper?.markClaimed(mentions) },
     })
     this.sweeper = settings.sweep.enabled
       ? new MentionSweeper({
@@ -110,6 +111,7 @@ export class RaftChannel extends Service {
         targets: settings.sweep.targets,
         logger,
         notify: (mentions, handle) => this.runtime.mention(mentions, handle),
+        busy: () => this.runtime.checkWork(),
       })
       : undefined
 

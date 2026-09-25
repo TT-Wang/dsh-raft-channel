@@ -5,6 +5,16 @@ export declare const MENTIONS_SCHEMA = "dsh-raft-channel-mentions.v1";
 export declare const SEEN_CAP = 2000;
 /** Per-CLI-call deadline. */
 export declare const CLI_TIMEOUT_MS = 10000;
+/** Pages (by `--offset`) one sweep reads per target: as many results as the seen-set holds. */
+export declare const MAX_SEARCH_PAGES: number;
+/**
+ * Mentions younger than this are left for the next sweep: the wake hint and
+ * `raft message check` usually deliver a mention within seconds, and a sweep
+ * that reported it first would only cost a duplicate notice and turn.
+ */
+export declare const MENTION_GRACE_MS = 30000;
+/** While the agent's own check work is pending, new mentions wait at most this long (from their send time) before a notice. */
+export declare const MAX_DEFER_MS: number;
 /** One `<result>` block of `raft message search` output. */
 export interface SearchResult {
     id: string;
@@ -53,6 +63,8 @@ export interface SweepOutcome {
     ok: boolean;
     /** Mentions a notice now names (0 when none were new or the notice failed). */
     notified: number;
+    /** New mentions held back because the agent's own check may still deliver them. */
+    deferred?: number;
     error?: string;
 }
 export interface SweeperOptions {
@@ -66,6 +78,16 @@ export interface SweeperOptions {
     logger: BridgeLogger;
     /** Queue one notice naming these mentions; false (or a throw) retries them next sweep. */
     notify: (mentions: Mention[], handle: string) => Promise<boolean>;
+    /**
+     * Why a `raft message check` of the agent may still deliver new mentions
+     * (an unclaimed wake notice, a wake turn before its check, a check call in
+     * flight), if it may: new mentions then wait for a later sweep.
+     */
+    busy?: () => string | undefined;
+    /** Minimum mention age before a report (default {@link MENTION_GRACE_MS}). */
+    graceMs?: number;
+    /** Search pages read per target and sweep (default {@link MAX_SEARCH_PAGES}). */
+    maxPages?: number;
     env?: NodeJS.ProcessEnv;
     platform?: NodeJS.Platform;
     timeoutMs?: number;
@@ -85,22 +107,39 @@ export declare class MentionSweeper {
     private saving;
     private stopped;
     private readonly children;
+    /** Notified mentions whose notice this process queued and no turn has claimed yet. */
+    private readonly unclaimed;
+    /** Unclaimed mentions a previous process left in the file: its notice is gone, so queue them again. */
+    private readonly orphans;
+    private started;
     private runs;
     private lastError;
     constructor(options: SweeperOptions);
     private now;
-    /** Sweep once now, then every `intervalMs` after each sweep finishes. */
+    /**
+     * Sweep once now, then every `intervalMs` after each sweep finishes. A sweep
+     * already running (an early {@link sweep} call) is awaited first, then this
+     * one runs, so the startup sweep always sees the attached session.
+     */
     start(): void;
     private schedule;
     status(): {
         runs: number;
         seen: number;
+        unclaimed: number;
+        scheduled: boolean;
         lastError?: string;
     };
     /** Run one sweep; while one is running, its outcome (never two at once). */
     sweep(): Promise<SweepOutcome>;
     /** Record short ids a `raft message check` returned, so the sweep does not report them again. */
     markChecked(shortIds: readonly string[]): void;
+    /**
+     * A turn claimed the notice naming these mentions: they no longer need
+     * queuing again after a restart. Recorded even after {@link stop}, since a
+     * claim can land while the plugin shuts down.
+     */
+    markClaimed(mentions: readonly MentionRef[]): void;
     private run;
     /** Run the raft CLI read-only with the profile's environment; stdout on exit 0. */
     private cli;

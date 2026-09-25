@@ -122,6 +122,8 @@ export interface RuntimeOptions {
   secrets: () => readonly string[]
   /** Output of each `raft message check` tool call the agent ran (for the mention sweep). */
   onCheckOutput?: (text: string) => void
+  /** A turn claimed the mention notice naming these mentions (for the mention sweep). */
+  onMentionsClaimed?: (mentions: readonly MentionRef[]) => void
 }
 
 /** A mention notice not yet claimed by a turn, with what it names (merged or moved as a whole). */
@@ -592,12 +594,37 @@ export class RaftRuntime {
   private injectMention(live: LiveSession, mentions: MentionRef[], handle: string): boolean {
     try {
       const { id, claimed } = this.inject(live, mentionNotice(mentions, handle))
-      if (!claimed) this.pendingMention = { sessionId: live.id, messageId: id, mentions, handle }
+      if (claimed) this.mentionsClaimed(mentions)
+      else this.pendingMention = { sessionId: live.id, messageId: id, mentions, handle }
       return true
     } catch (error) {
       this.options.logger.error(`raft-channel: mention notice injection into ${live.id} failed: ${errorText(error)}`)
       return false
     }
+  }
+
+  private mentionsClaimed(mentions: readonly MentionRef[]): void {
+    try {
+      this.options.onMentionsClaimed?.(mentions)
+    } catch (error) {
+      this.options.logger.warn(`raft-channel: mention claim handling failed: ${errorText(error)}`)
+    }
+  }
+
+  /**
+   * Why a `raft message check` of the agent may still deliver messages that
+   * reached Raft by now, if it may: a wake notice waits unclaimed, a
+   * notice-started turn has not run its check yet, or a check call has not
+   * returned. The mention sweep holds new mentions back meanwhile, so a
+   * mention the normal path is about to deliver gets no second notice.
+   */
+  checkWork(): string | undefined {
+    const live = this.current
+    if (live === undefined || this.disposed) return undefined
+    if (this.noticePending(live)) return 'an unclaimed wake notice'
+    if (this.preCheckTurn()) return 'a wake turn that has not run raft message check yet'
+    if (this.checkCalls.size > 0) return 'a raft message check call in flight'
+    return undefined
   }
 
   /**
@@ -609,7 +636,11 @@ export class RaftRuntime {
     const injecting = this.injecting
     const ours = injecting?.id === messageId
     if (ours) injecting!.claimed = true
-    if (this.pendingMention?.messageId === messageId) this.pendingMention = undefined
+    const mention = this.pendingMention
+    if (mention?.messageId === messageId) {
+      this.pendingMention = undefined
+      this.mentionsClaimed(mention.mentions)
+    }
     if (ours && !injecting!.wake) return
     const pending = this.pending
     if (ours || pending !== undefined && pending.sessionId === sessionId && pending.messageId === messageId) {

@@ -93,7 +93,7 @@ const ACTIVITY_KEYS = ['enabled', 'queueCap'] as const
 const ROTATE_KEYS = ['maxTurns', 'maxHistoryChars'] as const
 const SWEEP_KEYS = ['enabled', 'intervalMs', 'lookbackMs', 'targets'] as const
 /** A channel or channel-thread target; DM sources carry no reliable reply target in search output. */
-const CHANNEL_TARGET = /^#[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9_-]+)?$/
+const CHANNEL_TARGET = /^#[\p{L}\p{N}][\p{L}\p{N}._-]*(?::[A-Za-z0-9_-]+)?$/u
 
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/

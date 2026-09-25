@@ -14,7 +14,9 @@
 // `profile show --json` and `message search` (the mention sweep) print what
 // CLI 0.0.26 prints, byte for byte in shape, from the JSON file named by
 // FAKE_RAFT_SWEEP (absent: this profile, no results), and record their argv to
-// FAKE_RAFT_SWEEP_LOG (never to FAKE_RAFT_LOG). File shape:
+// FAKE_RAFT_SWEEP_LOG (never to FAKE_RAFT_LOG).
+// Paging (`--offset`) and the server's any-term fallback on an empty strict
+// first page are mirrored. File shape:
 //   { profile?: 'fail' | {name, displayName, id}, search?: 'fail' | 'hang',
 //     results?: [{ id, channelType, channelName, parentChannelType?, parentChannelName?,
 //                  senderName, senderType, content, createdAt }] }
@@ -60,17 +62,20 @@ async function sweepCommand() {
     await new Promise(() => {})
   }
   const query = (opt('--query') ?? '').trim()
-  const words = query.replace(/^@/, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  const words = query.replace(/^@/, '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
   const after = opt('--after') === undefined ? undefined : Date.parse(opt('--after'))
   const target = opt('--target')
   const limit = Math.min(Number(opt('--limit') ?? 20), 50)
-  const results = (spec.results ?? [])
-    // Full-text-like: every word of the query, anywhere (so plain "slicey dsh" matches too).
-    .filter((r) => words.every((word) => r.content.toLowerCase().includes(word)))
+  const offset = Number(opt('--offset') ?? 0)
+  const candidates = (spec.results ?? [])
     .filter((r) => after === undefined || Date.parse(r.createdAt) > after)
     .filter((r) => target === undefined || targetOf(r) === target)
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, limit)
+  // Full-text-like: every word of the query, anywhere (so plain "slicey dsh" matches too).
+  let matched = candidates.filter((r) => words.every((word) => r.content.toLowerCase().includes(word)))
+  // As the server (searchService.ts:724-727): no strict match on the first page falls back to any term.
+  if (matched.length === 0 && offset === 0) matched = candidates.filter((r) => words.some((word) => r.content.toLowerCase().includes(word)))
+  const results = matched.slice(offset, offset + limit)
   process.stdout.write(`${formatSearchResults(query, { results })}\n`)
   process.exit(0)
 }

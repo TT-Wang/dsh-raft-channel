@@ -75,5 +75,7 @@ describe('config', () => {
     expect(() => resolveConfig({ ...base, sweep: { targets: 'all' } }, {}, HOME)).toThrow(/sweep\.targets must be a non-empty list/)
     expect(() => resolveConfig({ ...base, sweep: { targets: ['dm:@alice'] } }, {}, HOME)).toThrow(/is not a channel target/)
     expect(() => resolveConfig({ ...base, sweep: { targets: ['all'] } }, {}, HOME)).toThrow(/is not a channel target/)
+    // Raft names are Unicode letters and digits.
+    expect(resolveConfig({ ...base, sweep: { targets: ['#研发', '#研发:0ffb9edf'] } }, {}, HOME).sweep.targets).toEqual(['#研发', '#研发:0ffb9edf'])
   })
 })
