@@ -49,6 +49,13 @@ function errorName(error: unknown): string | undefined {
   return error instanceof Error ? error.name : undefined
 }
 
+function isNotFound(error: unknown): boolean {
+  for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
+    if (cause.name === 'SessionPersistenceNotFoundError' || cause.name === 'SessionQueryError' && /not.found/i.test(cause.message)) return true
+  }
+  return false
+}
+
 export class RaftRuntime {
   private current: LiveSession | undefined
   /** Rotated-out sessions still finishing their work; they keep reporting activity until disposed. */
@@ -115,8 +122,14 @@ export class RaftRuntime {
           if (errorName(error) === 'SessionAlreadyOwnedError') {
             throw new Error(`session ${state.sessionId} is already owned by a live writer; is another DSH process running Raft profile ${config.profile}?`)
           }
-          logger.error(`raft-channel: cannot resume ${state.sessionId} (${errorText(error)}); continuing in a new session`)
-          live = await this.createFrom(state.index + 1, state.sessionId)
+          if (isNotFound(error)) {
+            // Created but never written to (no turn ran before the restart): reuse the id.
+            logger.info(`raft-channel: ${state.sessionId} was never persisted; creating it now`)
+            live = await this.createFrom(state.index, state.previousSessionId)
+          } else {
+            logger.error(`raft-channel: cannot resume ${state.sessionId} (${errorText(error)}); continuing in a new session`)
+            live = await this.createFrom(state.index + 1, state.sessionId)
+          }
         }
       } else {
         live = await this.createFrom(state === undefined ? 1 : state.index + 1, state?.sessionId)
