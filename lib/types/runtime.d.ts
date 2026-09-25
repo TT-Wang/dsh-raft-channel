@@ -5,6 +5,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type Agent } from '@deepseek-ai/dsh-agent';
+import { type MessageId } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 import { type ActivityQueue } from './activity.js';
 import type { ResolvedConfig } from './config.js';
@@ -34,6 +35,7 @@ export declare class RaftRuntime {
     private recoverDelayMs;
     private disposed;
     private lastSessionId;
+    private injecting;
     constructor(options: RuntimeOptions);
     /** The current session id, reported to the bridge as `runtimeSession`. */
     runtimeSession(): string | undefined;
@@ -69,6 +71,8 @@ export declare class RaftRuntime {
      * @throws when the agent is gone or the inbox did not accept the message.
      */
     private inject;
+    /** `agent/inbox/claimed` feed: marks a notice claimed during its own followup(). */
+    onClaimed(messageId: MessageId): void;
     /**
      * Observe one appended session event of any session; ours feed activity and,
      * for the current session, turn counting and rotation.

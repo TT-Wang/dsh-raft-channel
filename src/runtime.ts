@@ -62,6 +62,7 @@ export class RaftRuntime {
   private recoverDelayMs = 1000
   private disposed = false
   private lastSessionId: string | undefined
+  private injecting: { id: MessageId; claimed: boolean } | undefined
 
   constructor(private readonly options: RuntimeOptions) {}
 
@@ -287,9 +288,22 @@ export class RaftRuntime {
     if (this.options.ctx.agents.get(live.id) !== agent) throw new Error(`agent ${live.id} is no longer live`)
     live.selection.current = this.currentSelection()
     const message = createUserMessage({ content: [{ type: 'text', text: WAKE_NOTICE }], source: { kind: 'user' } })
-    agent.followup(message)
-    if (!agent.inbox.nextTurn.some(queued => queued.id === message.id)) throw new Error('the follow-up did not enter the agent inbox')
+    // An idle driver claims the message synchronously inside followup(), so
+    // "accepted" means still queued or already claimed by a turn.
+    this.injecting = { id: message.id, claimed: false }
+    try {
+      agent.followup(message)
+      const accepted = this.injecting.claimed || agent.inbox.nextTurn.some(queued => queued.id === message.id)
+      if (!accepted) throw new Error('the follow-up did not enter the agent inbox')
+    } finally {
+      this.injecting = undefined
+    }
     this.pending = { sessionId: live.id, messageId: message.id }
+  }
+
+  /** `agent/inbox/claimed` feed: marks a notice claimed during its own followup(). */
+  onClaimed(messageId: MessageId): void {
+    if (this.injecting?.id === messageId) this.injecting.claimed = true
   }
 
   /**

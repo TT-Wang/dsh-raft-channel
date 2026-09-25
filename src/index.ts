@@ -96,6 +96,7 @@ export class RaftChannel extends Service {
         logger.warn(`raft-channel: session event handling failed: ${errorText(error)}`)
       }
     })
+    ctx.on('agent/inbox/claimed', ({ message }) => { this.runtime.onClaimed(message.id) })
     ctx.on('agent/disposed', ({ agent }) => { this.runtime.onAgentDisposed(agent) })
 
     let disposed = false
