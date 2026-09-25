@@ -24,6 +24,8 @@ dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 
 唤醒提示是一条纯文本的 user 消息，source kind 为 `user`。这是有意为之：slice 策略只封存这一类消息，换成其他 kind，每条提示都会原样留在之后的每次请求里。
 
+组合了 `@deepseek-ai/dsh-web-app` 时要注意：web-app 会挂载 agent 预设注册表（`ctx.agentPresets`），bash、read、write 等模型可见工具都放在预设里，agent 必须加入某个预设才能拿到；不加入的话只看得到全局注册的工具（比如 slice 的 recall 工具），连 `raft message check` 都跑不了。本插件创建会话时会加入 `agentPreset`（默认取注册表当前默认预设），并把它写进会话头；恢复时加入会话记录的预设，没有记录的（例如本功能上线前创建的会话）加入配置或默认预设。预设不存在或不可用时启动直接失败，并带上注册表的原始错误。所用预设必须包含 shell 工具（`bash` 或 `pwsh`）。每次创建或恢复后，插件会把 agent 能看到的工具名写进日志，没有 shell 工具时记一条 error。没有预设注册表的组合（如只有 `dsh-base`）行为不变。
+
 ## 启动
 
 ```sh
@@ -36,7 +38,7 @@ dsh --profile <name>
 
 ## 配置
 
-`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
+`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`agentPreset`（默认取预设注册表当前的默认预设；仅在组合了 `ctx.agentPresets` 时生效）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
 
 ## 行为要点
 

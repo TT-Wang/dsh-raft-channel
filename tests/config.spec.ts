@@ -55,5 +55,8 @@ describe('config', () => {
     expect(() => resolveConfig({ ...base, rotate: { maxTurns: 0 } }, {}, HOME)).toThrow(/maxTurns/)
     expect(() => resolveConfig({ ...base, cwd: 'relative/dir' }, {}, HOME)).toThrow(/absolute/)
     expect(resolveConfig({ ...base, cwd: '/work/raft', sessionPrefix: 'bot' }, {}, HOME)).toMatchObject({ cwd: '/work/raft', sessionPrefix: 'bot' })
+    expect(resolveConfig(base, {}, HOME).agentPreset).toBeUndefined()
+    expect(resolveConfig({ ...base, agentPreset: ' standard ' }, {}, HOME).agentPreset).toBe('standard')
+    expect(() => resolveConfig({ ...base, agentPreset: '' }, {}, HOME)).toThrow(/agentPreset must be a non-empty string/)
   })
 })

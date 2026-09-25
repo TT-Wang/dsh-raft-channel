@@ -60,9 +60,22 @@ export declare class RaftRuntime {
     private setupFor;
     private agentOptions;
     private liveSession;
+    /**
+     * List the session under its cwd in the workspace registry (web UI), when
+     * the composition has one. Idempotent for an already attached session; a
+     * failure only costs the listing.
+     */
+    private registerWorkspace;
+    /**
+     * Startup self-check: log the tools the agent's requests carry, and fail
+     * loudly when none is a shell — the agent could not run `raft message
+     * check`, and the bridge would re-wake it forever.
+     */
+    private checkTools;
     private resume;
     /** Create `<prefix>-<n>` for the first free n ≥ start and point the state file at it. */
     private createFrom;
+    private createWith;
     /** Answer one wake POST: 2xx only once a notice is in (or already covering) the inbox. */
     wake(): Promise<WakeOutcome>;
     private noSession;

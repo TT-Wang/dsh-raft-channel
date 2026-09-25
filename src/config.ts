@@ -41,6 +41,12 @@ export interface Config {
   port?: number
   /** Leading-edge wake debounce window in ms (default 1000; 0 disables the window). */
   debounceMs?: number
+  /**
+   * Agent preset new sessions join, and resumed sessions that recorded none,
+   * when the composition has the agent-preset registry (default: the
+   * registry's current default). Ignored without the registry.
+   */
+  agentPreset?: string
   bridge?: BridgeConfig
   activity?: ActivityConfig
   rotate?: RotateConfig
@@ -55,6 +61,8 @@ export interface ResolvedConfig {
   host: string
   port: number
   debounceMs: number
+  /** Configured agent preset; undefined follows the registry default. */
+  agentPreset: string | undefined
   bridge: { enabled: boolean; pollIntervalMs: number | undefined; restartBackoffMs: [number, number] }
   activity: { enabled: boolean; queueCap: number }
   rotate: { maxTurns: number; maxHistoryChars: number }
@@ -64,7 +72,7 @@ export interface ResolvedConfig {
   exportProfile: boolean
 }
 
-const TOP_KEYS = ['profile', 'expectedAgentId', 'raftBin', 'sessionPrefix', 'cwd', 'host', 'port', 'debounceMs', 'bridge', 'activity', 'rotate'] as const
+const TOP_KEYS = ['profile', 'expectedAgentId', 'raftBin', 'sessionPrefix', 'cwd', 'host', 'port', 'debounceMs', 'agentPreset', 'bridge', 'activity', 'rotate'] as const
 const BRIDGE_KEYS = ['enabled', 'pollIntervalMs', 'restartBackoffMs'] as const
 const ACTIVITY_KEYS = ['enabled', 'queueCap'] as const
 const ROTATE_KEYS = ['maxTurns', 'maxHistoryChars'] as const
@@ -175,6 +183,7 @@ export function resolveConfig(raw: unknown, env: Record<string, string | undefin
     host: str(config.host, 'host') ?? '127.0.0.1',
     port: int(config.port, 0, 'port', 0, 65_535),
     debounceMs: int(config.debounceMs, 1000, 'debounceMs', 0, 60_000),
+    agentPreset: str(config.agentPreset, 'agentPreset'),
     bridge: {
       enabled: bridgeEnabled,
       pollIntervalMs: bridge.pollIntervalMs === undefined ? undefined : int(bridge.pollIntervalMs, 0, 'bridge.pollIntervalMs', 1),

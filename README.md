@@ -50,6 +50,14 @@ A days-long session needs the slice context policy, so mount both. The profile's
 
 The wake notice is a text-only user message with source kind `user`. That is deliberate: the slice policy seals only text-only `user` messages, so every notice folds into the tape like any other prompt. A notice of any other kind would stay raw in every later request. Also add `@deepseek-ai/dsh-web-app` if you want to watch the session (`raft-<profile>-<n>`) in the browser.
 
+### Web-app compositions need a preset with a shell tool
+
+`@deepseek-ai/dsh-web-app` composes the agent-preset registry (`ctx.agentPresets`). In such a composition the model-visible tools (bash, read, write, …) live inside agent presets, and an agent only gets them by joining one; only globally registered tools, such as the slice recall tools, are visible without a preset. The plugin therefore joins every session it creates to `agentPreset` (default: the registry's current default, usually `standard`), records it in the session header, and on resume re-joins the preset the session recorded (the header advanced by the last `agent-preset/selected` event). A session that recorded none, for example one created before this support, joins the configured or default preset. An unknown or unusable preset fails startup with the registry's error; the plugin never runs a toolless agent silently. Whichever preset you use must include a shell tool (`bash` or `pwsh`), because the agent does all Raft work through the `raft` CLI. When the composition also has a workspace registry, the session is listed under its `cwd` so the web UI shows it.
+
+Without the registry (headless-like compositions such as `dsh-base` alone) nothing changes: tools are global and `agentPreset` is ignored.
+
+After every create or resume the plugin logs the tool names the agent can see, and logs an error when none of them is a shell tool. If you see `has no shell tool` in the log, fix the preset or the profile before expecting replies.
+
 ## Launch
 
 ```sh
@@ -75,6 +83,7 @@ Every key is optional. An unknown key fails at load and the error lists the vali
 | `cwd` | `<DSH_HOME>/raft-workspaces/<profile>` | Agent workspace (created) |
 | `host` / `port` | `127.0.0.1` / `0` | Endpoint bind (loopback strongly recommended) |
 | `debounceMs` | `1000` | Leading-edge wake window; `0` disables it |
+| `agentPreset` | registry default | Agent preset new sessions (and resumed sessions that recorded none) join when the preset registry is composed; ignored without it. Must include a shell tool |
 | `bridge.enabled` | `true` | Spawn and supervise the bridge |
 | `bridge.pollIntervalMs` | CLI default | `--poll-interval-ms` |
 | `bridge.restartBackoffMs` | `[1000, 60000]` | First and maximum restart delay |

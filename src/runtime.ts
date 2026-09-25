@@ -5,7 +5,7 @@
  */
 import { performance } from 'node:perf_hooks'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type AgentSetup, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage, type MessageId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
@@ -13,6 +13,17 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ActivityRecorder, sessionLifecycleEvent, type ActivityQueue } from './activity.js'
 import type { ResolvedConfig } from './config.js'
 import type { BridgeLogger } from './bridge.js'
+import {
+  acquirePreset,
+  isAgentPresetError,
+  mountPreset,
+  presetRegistry,
+  recordedPreset,
+  resolvePreset,
+  SHELL_TOOLS,
+  visibleToolNames,
+  workspaceRegistry,
+} from './presets.js'
 import type { WakeOutcome } from './server.js'
 import { readState, STATE_SCHEMA, writeState } from './state.js'
 import { ORIENTATION_SECTION, WAKE_NOTICE, orientationText } from './text.js'
@@ -57,7 +68,12 @@ interface LiveSession {
   turns: number
   selection: ModelSelectionRef
   recorder: ActivityRecorder | undefined
+  /** Agent preset the agent joined; undefined in a composition without the preset registry. */
+  preset: string | undefined
 }
+
+/** Composition step run in the setup callback before the model selection is installed. */
+type Compose = (agentCtx: Context, agent: Agent) => Promise<void>
 
 export interface RuntimeOptions {
   ctx: Context
@@ -152,6 +168,9 @@ export class RaftRuntime {
           logger.info(`raft-channel: resumed ${live.id} (${live.turns} turns)`)
           rewake = needsRewake(live.handle.agent.session.snapshotEvents())
         } catch (error) {
+          // A preset that cannot be resolved or mounted is a configuration
+          // error: a new session would hit it too, or run under another preset.
+          if (isAgentPresetError(error)) throw error
           if (errorName(error) === 'SessionAlreadyOwnedError') {
             throw new Error(`session ${state.sessionId} is already owned by a live writer; is another DSH process running Raft profile ${config.profile}?`)
           }
@@ -202,9 +221,12 @@ export class RaftRuntime {
     return this.options.ctx.agentDefaultModel.currentSelection()
   }
 
-  private setupFor(selection: ModelSelectionRef) {
+  private setupFor(selection: ModelSelectionRef, compose: Compose | undefined): AgentSetup {
     const text = orientationText(this.options.config.profile)
-    return (agentCtx: Context): void => {
+    return async (agentCtx: Context, agent: Agent): Promise<void> => {
+      // Join the preset first (as the webhook creator does): in a registry
+      // composition the preset carries every model-visible tool.
+      if (compose !== undefined) await compose(agentCtx, agent)
       installModelSelection(agentCtx, selection)
       agentCtx.systemPrompt.section({ name: ORIENTATION_SECTION, order: ORIENTATION_ORDER, text, interpolate: false })
     }
@@ -218,27 +240,95 @@ export class RaftRuntime {
     }
   }
 
-  private liveSession(index: number, handle: AgentHandle, selection: ModelSelectionRef, turns: number): LiveSession {
+  private async liveSession(index: number, handle: AgentHandle, selection: ModelSelectionRef, turns: number, preset: string | undefined): Promise<LiveSession> {
     const { activity, secrets } = this.options
     const id = handle.agent.session.id
+    await this.registerWorkspace(handle.agent)
+    this.checkTools(handle.agent, preset)
     const recorder = activity === undefined ? undefined : new ActivityRecorder(id, event => { activity.push(event) }, secrets)
     activity?.push(sessionLifecycleEvent('SessionStart', id))
-    return { index, id, handle, turns, selection, recorder }
+    return { index, id, handle, turns, selection, recorder, preset }
+  }
+
+  /**
+   * List the session under its cwd in the workspace registry (web UI), when
+   * the composition has one. Idempotent for an already attached session; a
+   * failure only costs the listing.
+   */
+  private async registerWorkspace(agent: Agent): Promise<void> {
+    const registry = workspaceRegistry(this.options.ctx)
+    if (registry === undefined) return
+    const path = agent.session.header.cwd ?? this.options.config.cwd
+    try {
+      const workspace = await registry.create(path)
+      await workspace.attachSession(agent.session.id)
+    } catch (error) {
+      this.options.logger.warn(`raft-channel: could not list ${agent.session.id} in workspace ${path}: ${errorText(error)}`)
+    }
+  }
+
+  /**
+   * Startup self-check: log the tools the agent's requests carry, and fail
+   * loudly when none is a shell — the agent could not run `raft message
+   * check`, and the bridge would re-wake it forever.
+   */
+  private checkTools(agent: Agent, preset: string | undefined): void {
+    const { logger } = this.options
+    const names = visibleToolNames(this.options.ctx, agent)
+    const id = agent.session.id
+    if (names === undefined) {
+      logger.warn(`raft-channel: no tool registry is mounted; ${id} has no tools and cannot run the raft CLI`)
+      return
+    }
+    const under = preset === undefined ? '' : ` (agent preset ${preset})`
+    logger.info(`raft-channel: ${id}${under} sees ${names.length} tools: ${names.join(', ') || '(none)'}`)
+    if (!names.some(name => SHELL_TOOLS.includes(name))) {
+      logger.error(`raft-channel: ${id}${under} has no shell tool (${SHELL_TOOLS.join(' or ')}); it cannot run \`raft message check\` and every wake will be wasted. ${preset === undefined
+        ? 'Mount a shell tool plugin in this profile.'
+        : 'Set agentPreset to a preset that includes a shell tool.'}`)
+    }
   }
 
   private async resume(id: SessionId, index: number): Promise<LiveSession> {
+    const { ctx, config, logger } = this.options
     const selected = this.currentSelection()
     const selection: ModelSelectionRef = { current: selected, assembled: undefined }
-    const handle = await this.options.ctx.agents.resume({
+    const presets = presetRegistry(ctx)
+    // Resolved before the resume, so an unusable configured preset fails the
+    // same way whether or not this session recorded its own.
+    const fallback = presets === undefined ? undefined : await resolvePreset(presets, config.agentPreset)
+    let mounted: string | undefined
+    const compose: Compose | undefined = presets === undefined || fallback === undefined ? undefined : async (agentCtx, agent) => {
+      const recorded = recordedPreset(agent.session)
+      if (recorded === undefined) logger.info(`raft-channel: ${id} recorded no agent preset; mounting ${fallback}`)
+      mounted = recorded ?? fallback
+      await mountPreset(presets, agentCtx, mounted)
+    }
+    const handle = await ctx.agents.resume({
       resumeSessionId: id,
       agentOptions: this.agentOptions(selected),
-      setup: this.setupFor(selection),
+      setup: this.setupFor(selection, compose),
     })
-    return this.liveSession(index, handle, selection, countTurns(handle.agent.session))
+    return this.liveSession(index, handle, selection, countTurns(handle.agent.session), mounted)
   }
 
   /** Create `<prefix>-<n>` for the first free n ≥ start and point the state file at it. */
   private async createFrom(start: number, previousSessionId?: string): Promise<LiveSession> {
+    const { config, ctx } = this.options
+    const presets = presetRegistry(ctx)
+    const preset = presets === undefined ? undefined : await resolvePreset(presets, config.agentPreset)
+    // Hold the resolved revision until the agent has joined it.
+    const lease = presets === undefined || preset === undefined ? undefined : await acquirePreset(presets, preset)
+    try {
+      return await this.createWith(start, previousSessionId, presets === undefined || preset === undefined
+        ? undefined
+        : { id: preset, compose: agentCtx => mountPreset(presets, agentCtx, preset) })
+    } finally {
+      await lease?.[Symbol.asyncDispose]()
+    }
+  }
+
+  private async createWith(start: number, previousSessionId: string | undefined, preset: { id: string; compose: Compose } | undefined): Promise<LiveSession> {
     const { config, ctx } = this.options
     for (let index = start; index < start + MAX_ID_PROBES; index += 1) {
       const id = `${config.sessionPrefix}-${index}` as SessionId
@@ -249,9 +339,9 @@ export class RaftRuntime {
       try {
         handle = await ctx.agents.create({
           sessionId: id,
-          meta: { cwd: config.cwd },
+          meta: { cwd: config.cwd, ...preset === undefined ? {} : { agentPreset: preset.id } },
           agentOptions: this.agentOptions(selected),
-          setup: this.setupFor(selection),
+          setup: this.setupFor(selection, preset?.compose),
         })
       } catch (error) {
         if (errorName(error) === 'SessionAlreadyExistsError' || /already exists/.test(errorText(error))) continue
@@ -272,8 +362,8 @@ export class RaftRuntime {
         // resume the previous session. Say so instead of failing the wake path.
         this.options.logger.error(`raft-channel: could not write ${config.stateFile}: ${errorText(error)}`)
       }
-      this.options.logger.info(`raft-channel: created session ${id}`)
-      return this.liveSession(index, handle, selection, 0)
+      this.options.logger.info(`raft-channel: created session ${id}${preset === undefined ? '' : ` under agent preset ${preset.id}`}`)
+      return this.liveSession(index, handle, selection, 0, preset?.id)
     }
     throw new Error(`no free session id in ${config.sessionPrefix}-${start}..${start + MAX_ID_PROBES - 1}`)
   }
