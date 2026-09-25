@@ -41,7 +41,9 @@ const monotonicNow = (): number => performance.now()
 /**
  * `raft message check` (or the legacy `slock` alias) as one command of a shell
  * line: at the start, after a separator, quote, subshell paren or path slash,
- * with an optional `--profile <slug>` before `message`. Env prefixes such as
+ * with an optional profile option before `message`: `--profile <slug>`,
+ * `--profile=<slug>`, or the CLI's short form `-p <slug>` / `-p<slug>`
+ * (commander registers `-p, --profile <slug>` globally). Env prefixes such as
  * `RAFT_PROFILE=x raft message check` and pipes after it match.
  *
  * Deliberately loose: the words anywhere after whitespace match too, so
@@ -50,7 +52,7 @@ const monotonicNow = (): number => performance.now()
  * rest of that turn (the plugin injects as it would without it); a missed
  * match could hold back a wake that needed a notice.
  */
-const RAFT_CHECK = /(^|[;&|(\s/"'`])(raft|slock)(\s+--profile(=|\s+)\S+)?\s+message\s+check\b/
+const RAFT_CHECK = /(^|[;&|(\s/"'`])(raft|slock)(\s+(--profile(=|\s+)|-p\s*)\S+)?\s+message\s+check\b/
 
 /** Whether one shell command line runs `raft message check`. */
 export function isRaftCheckCommand(command: string): boolean {

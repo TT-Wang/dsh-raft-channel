@@ -21,6 +21,10 @@ describe('raft message check detection', () => {
     'SLOCK_PROFILE=x slock message check',
     'raft --profile x message check 2>&1 | head',
     'raft --profile=x message check --json',
+    'raft -p x message check',
+    'raft -px message check',
+    'raft -p x message check 2>&1 | tail -n 20',
+    'slock -p x message check',
     'cd /tmp && raft message check',
     'true; raft message check',
     '(raft message check)',
@@ -39,6 +43,7 @@ describe('raft message check detection', () => {
     'raft messages check',
     'myraft message check',
     'raft task check',
+    'raft -p x message read',
     '',
   ])('does not match %j', command => {
     expect(isRaftCheckCommand(command)).toBe(false)
@@ -121,9 +126,13 @@ describe('check-aware wake coalescing', () => {
     expect(notices(h)).toEqual([WAKE_NOTICE, WAKE_NOTICE])
   })
 
-  it('a wake after the check call started queues a second notice, which runs as the next turn', async () => {
+  it.each([
+    'RAFT_PROFILE=test-profile raft message check 2>&1',
+    // The CLI's short profile flag: missing it would answer the post-check wake 200 without a notice.
+    'raft -p test-profile message check 2>&1',
+  ])('a wake after the check call %j started queues a second notice, which runs as the next turn', async command => {
     const { token, url } = await mount()
-    h.adapter.queue.push(raftCheck('check-1', 'RAFT_PROFILE=test-profile raft message check 2>&1'), text('handled'))
+    h.adapter.queue.push(raftCheck('check-1', command), text('handled'))
     const release = holdRequest(h, 2)
     await postWake(url, token, wakeBody(1))
     await until(() => h.adapter.requests.length === 2, 5000, 'check ran, turn still in flight')
