@@ -7,7 +7,7 @@ export { WAKE_NOTICE, orientationText, ORIENTATION_SECTION } from './text.js';
 export { ActivityQueue, ActivityRecorder, capContent, redactCredentials, validateActivityEvent, CONTENT_CAP } from './activity.js';
 export type { ActivityEvent, DrainResult } from './activity.js';
 export { BridgeSupervisor, buildBridgeArgs, buildBridgeEnv, bridgeSpawnPlan, TERMINAL_ERROR_CODES } from './bridge.js';
-export type { BridgeStatus, BridgeState } from './bridge.js';
+export type { BridgeLogger, BridgeOptions, BridgeStatus, BridgeState } from './bridge.js';
 export { startChannelServer, validateWakeBody, WAKE_SCHEMA } from './server.js';
 export type { WakeOutcome, FailureClass } from './server.js';
 export { readState, writeState, STATE_SCHEMA } from './state.js';
