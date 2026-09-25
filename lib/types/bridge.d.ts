@@ -37,8 +37,10 @@ export interface BridgeStatus {
 }
 /**
  * CLI error codes no restart can fix: configuration and identity. Anything
- * else (BRIDGE_ALREADY_RUNNING from a dying predecessor, crashes, signals)
- * restarts with backoff.
+ * else (BRIDGE_ALREADY_RUNNING from a dying predecessor, crashes, signals, and
+ * `bridge_fatal` for transient server refusals such as HTTP 429) restarts with
+ * backoff. The CLI emits `bridge_fatal` for every non-SERVER_5XX CliError, so
+ * that event alone is not a reason to stop.
  */
 export declare const TERMINAL_ERROR_CODES: Set<string>;
 /**
@@ -81,6 +83,13 @@ export declare class BridgeSupervisor {
     private onStderr;
     private markTerminal;
     private scheduleRestart;
+    /**
+     * After {@link stop}: run one `--once` bridge iteration (poll mode, no
+     * stream) so activity queued at shutdown, such as SessionEnd, still reaches
+     * the server. Skipped after a terminal failure; bounded by `timeoutMs`.
+     * Wakes it replays meet a disposed runtime (503) and stay in its ledger.
+     */
+    runOnce(timeoutMs?: number): Promise<void>;
     /** Kill the child (SIGTERM, then SIGKILL after `graceMs`) and cancel restarts. */
     stop(graceMs?: number): Promise<void>;
 }

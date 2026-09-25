@@ -43,10 +43,11 @@ dsh --profile <name>
 - 唤醒提示固定为下面这一行，不带任何 id、时间或计数：
   `[Raft wake] New Raft activity is waiting. Run \`raft message check\` now to read it, then handle it as your Raft instructions describe.`
 - 只有提示已经进入 agent 收件箱（仍在排队，或已被某个 turn 领取），`POST /wake` 才返回 `2xx {ok:true, runtimeSession}`。token 不对返回 401；请求里带内容类字段返回 400。
-- 合并唤醒：上一条提示还没被领取时，新唤醒只回复确认、不再注入；窗口期（`debounceMs`）内到达的唤醒，在窗口结束时合并成一条提示。
+- 合并唤醒：上一条提示还没被领取时，新唤醒只回复确认、不再注入；窗口期（`debounceMs`）内到达的唤醒，在窗口结束时合并成一条提示。窗口用单调时钟计时，系统时间回拨不会拉长它。
+- 已确认的唤醒不会因停止而丢失：挂上会话时（启动或外部 dispose 后重新挂载）会检查日志，末尾若是未结束的 turn、以 interrupted/aborted/error 结束的 turn，或被 dispose 取消的排队提示，就立即补发一条提示。
 - 状态文件 `<DSH_HOME>/raft-channel/<profile>.json` 以原子方式写入，重启后按它恢复同一个会话。某个 turn 结束时，若轮数或历史长度超过阈值，就切换到 `<prefix>-<n+1>`。尚未被领取的提示会随之迁到新会话，旧会话仍可恢复。
-- bridge 的启动参数带 `--runtime-session` 和 `--expected-agent`，token 只通过环境变量 `RAFT_CHANNEL_TOKEN` 传给子进程。子进程退出后按指数退避重启；遇到 `bridge_fatal`、鉴权被撤销或身份不匹配时停止重启，并写错误日志。
+- bridge 的启动参数带 `--runtime-session` 和 `--expected-agent`，token 只通过环境变量 `RAFT_CHANNEL_TOKEN` 传给子进程。子进程退出后按指数退避重启。CLI 对所有非 5xx 错误都会发 `bridge_fatal`（包括 429 这类暂时性拒绝），这种情况照样退避重启。只有鉴权被撤销（401/403）或配置、身份类错误码（如 `BRIDGE_IDENTITY_MISMATCH`、`PROFILE_FILE_INVALID`）才会永久停止重启，并写错误日志。
 - activity 的来源是 DSH 会话里的 turn 事件和工具事件，字段与 Raft 服务端接受的完全一致。工具内容先脱敏，再截断到 4096 字符并打上截断标记。模型的思考和回复文本不会上报。
-- 插件从不写 stdout，所有输出都走 DSH logger。dispose 时会关掉子进程、端点和所有定时器。
+- 插件从不写 stdout，所有输出都走 DSH logger。dispose 时先停运行时（挂起的唤醒回 503，排入 `SessionEnd`），再停 bridge，然后用一次 `raft agent bridge --once` 把 `SessionEnd` 转发出去（Raft 上显示离线），最后关端点和所有定时器。
 
 完整说明见 [README.md](README.md)。

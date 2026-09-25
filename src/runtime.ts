@@ -3,6 +3,7 @@
  * profile (resumed across restarts, rotated past size thresholds) and the
  * wake → fixed-notice injection with coalescing.
  */
+import { performance } from 'node:perf_hooks'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -20,6 +21,34 @@ import { ORIENTATION_SECTION, WAKE_NOTICE, orientationText } from './text.js'
 export const ORIENTATION_ORDER = 10_100
 /** How far `createFrom` probes past occupied ids before giving up. */
 const MAX_ID_PROBES = 1000
+/** Turn endings after which the model may not have run `raft message check`. */
+const UNFINISHED_TURN_ENDS = new Set(['interrupted', 'aborted', 'error'])
+
+/** Monotonic milliseconds: the debounce window must not stretch when the wall clock jumps back. */
+const monotonicNow = (): number => performance.now()
+
+/**
+ * Whether a session log ends with acknowledged wake work that never ran to
+ * completion: a turn still open (crash or dispose mid-turn), a turn closed as
+ * interrupted, aborted or failed, or queued input canceled by a dispose. The
+ * latest such fact wins; a completed turn after it already checked Raft.
+ */
+export function needsRewake(events: readonly SessionEvent[]): boolean {
+  let unfinished = false
+  let open = false
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      open = true
+    } else if (event.type === 'turn/end') {
+      open = false
+      unfinished = UNFINISHED_TURN_ENDS.has((event as SessionEvent<'turn/end'>).data.reason.kind)
+    } else if (event.type === 'agent/inbox/spliced') {
+      const data = (event as SessionEvent<'agent/inbox/spliced'>).data
+      if (data.outcome === 'canceled' && (data.removedCount ?? 0) > 0) unfinished = true
+    }
+  }
+  return unfinished || open
+}
 
 interface LiveSession {
   index: number
@@ -114,10 +143,14 @@ export class RaftRuntime {
         state = undefined
       }
       let live: LiveSession
+      // Set when the session we attach may hold (or have lost) a wake that
+      // was answered 2xx before the previous process stopped.
+      let rewake = false
       if (state !== undefined && persistent) {
         try {
           live = await this.resume(state.sessionId as SessionId, state.index)
           logger.info(`raft-channel: resumed ${live.id} (${live.turns} turns)`)
+          rewake = needsRewake(live.handle.agent.session.snapshotEvents())
         } catch (error) {
           if (errorName(error) === 'SessionAlreadyOwnedError') {
             throw new Error(`session ${state.sessionId} is already owned by a live writer; is another DSH process running Raft profile ${config.profile}?`)
@@ -129,6 +162,8 @@ export class RaftRuntime {
           } else {
             logger.error(`raft-channel: cannot resume ${state.sessionId} (${errorText(error)}); continuing in a new session`)
             live = await this.createFrom(state.index + 1, state.sessionId)
+            // Whatever the unreadable session still owed is unknown: check once.
+            rewake = true
           }
         }
       } else {
@@ -139,7 +174,23 @@ export class RaftRuntime {
         return
       }
       this.attach(live)
+      if (rewake) this.rewake(live, 'the previous run')
     })
+  }
+
+  /**
+   * Queue one fresh notice on a session re-attached after a stop that may have
+   * dropped an acknowledged wake (the bridge would otherwise wait for its
+   * reconciliation, about two minutes). At-least-once: the check is idempotent.
+   */
+  private rewake(live: LiveSession, why: string): void {
+    try {
+      this.inject(live)
+      this.windowEnd = monotonicNow() + this.options.config.debounceMs
+      this.options.logger.info(`raft-channel: ${why} left wake work in ${live.id} unfinished; queued a fresh wake notice`)
+    } catch (error) {
+      this.options.logger.error(`raft-channel: could not queue the recovery wake notice in ${live.id}: ${errorText(error)}`)
+    }
   }
 
   private attach(live: LiveSession): void {
@@ -244,7 +295,7 @@ export class RaftRuntime {
     // An unclaimed notice is still ahead of the model, and its check will
     // drain whatever this wake announced.
     if (this.noticePending(live)) return { outcome: { ok: true, runtimeSession: live.id } }
-    if (this.options.config.debounceMs > 0 && Date.now() < this.windowEnd) {
+    if (this.options.config.debounceMs > 0 && monotonicNow() < this.windowEnd) {
       return { wait: new Promise<WakeOutcome>(resolve => { this.tail.push(resolve); this.armTail() }) }
     }
     return { outcome: this.injectOutcome(live) }
@@ -257,7 +308,7 @@ export class RaftRuntime {
       this.serial(async () => { this.flushTail() }).catch((error: unknown) => {
         this.options.logger.error(`raft-channel: wake flush failed: ${errorText(error)}`)
       })
-    }, Math.max(0, this.windowEnd - Date.now()))
+    }, Math.max(0, this.windowEnd - monotonicNow()))
     this.tailTimer.unref()
   }
 
@@ -282,7 +333,7 @@ export class RaftRuntime {
   private injectOutcome(live: LiveSession): WakeOutcome {
     try {
       this.inject(live)
-      this.windowEnd = Date.now() + this.options.config.debounceMs
+      this.windowEnd = monotonicNow() + this.options.config.debounceMs
       return { ok: true, runtimeSession: live.id }
     } catch (error) {
       this.options.logger.error(`raft-channel: wake injection into ${live.id} failed: ${errorText(error)}`)
@@ -409,6 +460,10 @@ export class RaftRuntime {
         this.attach(live)
         this.recoverDelayMs = 1000
         this.options.logger.info(`raft-channel: re-attached ${live.id}`)
+        // The dispose canceled any queued notice and interrupted any running
+        // turn; the resumed log (or, in memory, the lost one) shows which.
+        const events = persistent ? live.handle.agent.session.snapshotEvents() : lost.handle.agent.session.snapshotEvents()
+        if (needsRewake(events)) this.rewake(live, 'the external dispose')
       }).catch((error: unknown) => {
         this.recoverDelayMs = Math.min(this.recoverDelayMs * 2, 60_000)
         this.options.logger.error(`raft-channel: re-attaching ${lost.id} failed: ${errorText(error)}; retrying in ${this.recoverDelayMs}ms`)

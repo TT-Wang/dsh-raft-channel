@@ -151,10 +151,17 @@ export class RaftChannel extends Service {
     ctx.effect(() => async () => {
       disposed = true
       this.state = 'disposed'
-      // No new wakes first, then the endpoint, then the agents.
-      await this.bridge?.stop().catch(() => undefined)
-      await this.server?.close().catch(() => undefined)
+      // The runtime first: it answers held and new wakes 503 (the bridge keeps
+      // those hints), queues SessionEnd and disposes the agents. Then the
+      // bridge, then one `--once` pass so SessionEnd reaches the server (Raft
+      // shows the agent offline instead of ready), then the endpoint.
       await this.runtime.dispose().catch((error: unknown) => { logger.warn(`raft-channel: dispose: ${errorText(error)}`) })
+      const bridge = this.bridge
+      await bridge?.stop().catch(() => undefined)
+      if (bridge !== undefined && this.server !== undefined && (this.activity?.size ?? 0) > 0) {
+        await bridge.runOnce().catch(() => undefined)
+      }
+      await this.server?.close().catch(() => undefined)
       if (exported && process.env.RAFT_PROFILE === settings.profile) delete process.env.RAFT_PROFILE
     }, 'raft-channel')
   }

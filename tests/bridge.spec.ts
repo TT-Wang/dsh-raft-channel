@@ -72,6 +72,27 @@ describe('bridge supervisor', () => {
     expect(logger.lines.some(([type, line]) => type === 'error' && line.includes('stopped for good'))).toBe(true)
   })
 
+  it('restarts with backoff after a transient bridge_fatal (HTTP 429) instead of stopping for good', async () => {
+    const { supervisor, logger } = make('transient')
+    supervisor.start()
+    await until(() => fakeRaftRecords(log).length >= 3, 5000, 'respawns after bridge_fatal')
+    const status = supervisor.getStatus()
+    expect(status.state).not.toBe('fatal')
+    expect(status.terminalCode).toBeUndefined()
+    expect(status.restartCount).toBeGreaterThanOrEqual(2)
+    expect(logger.lines.some(([type, line]) => type === 'error' && line.includes('bridge_fatal BRIDGE_WAKE_STREAM_FAILED') && line.includes('restarting with backoff'))).toBe(true)
+    expect(logger.lines.some(([, line]) => line.includes('stopped for good'))).toBe(false)
+  })
+
+  it('stops restarting on a broken profile credential (PROFILE_FILE_INVALID)', async () => {
+    const { supervisor } = make('profile-invalid')
+    supervisor.start()
+    await until(() => supervisor.getStatus().state === 'fatal', 5000, 'terminal state')
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(fakeRaftRecords(log)).toHaveLength(1)
+    expect(supervisor.getStatus()).toMatchObject({ terminalCode: 'PROFILE_FILE_INVALID', restartCount: 0 })
+  })
+
   it('stops restarting on an expected-agent mismatch', async () => {
     const { supervisor } = make('mismatch')
     supervisor.start()

@@ -1,8 +1,3 @@
-/**
- * The runtime half of the wake contract: one persistent agent session per
- * profile (resumed across restarts, rotated past size thresholds) and the
- * wake → fixed-notice injection with coalescing.
- */
 import type { Context } from '@deepseek-ai/cordis';
 import { type Agent } from '@deepseek-ai/dsh-agent';
 import { type MessageId } from '@deepseek-ai/dsh-llm';
@@ -13,6 +8,13 @@ import type { BridgeLogger } from './bridge.js';
 import type { WakeOutcome } from './server.js';
 /** Placement of the orientation: after the deployment persona body, before its suffix (10200). */
 export declare const ORIENTATION_ORDER = 10100;
+/**
+ * Whether a session log ends with acknowledged wake work that never ran to
+ * completion: a turn still open (crash or dispose mid-turn), a turn closed as
+ * interrupted, aborted or failed, or queued input canceled by a dispose. The
+ * latest such fact wins; a completed turn after it already checked Raft.
+ */
+export declare function needsRewake(events: readonly SessionEvent[]): boolean;
 export interface RuntimeOptions {
     ctx: Context;
     config: ResolvedConfig;
@@ -47,6 +49,12 @@ export declare class RaftRuntime {
     private serial;
     /** Resume the session named by the state file, or create the first one. */
     start(): Promise<void>;
+    /**
+     * Queue one fresh notice on a session re-attached after a stop that may have
+     * dropped an acknowledged wake (the bridge would otherwise wait for its
+     * reconciliation, about two minutes). At-least-once: the check is idempotent.
+     */
+    private rewake;
     private attach;
     private currentSelection;
     private setupFor;

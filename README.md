@@ -102,7 +102,9 @@ Example row override in the profile's `cordis.patch.yml`. The override replaces 
 
 **Wake answers.** `POST /wake` requires `x-raft-bridge-token`. The token is minted per process and passed only to the bridge child, in `RAFT_CHANNEL_TOKEN`. The endpoint accepts `schema: raft-channel-wake.v1` and tolerates a missing schema. It answers `400 protocol_mismatch` to content-shaped fields (`text`, `content`, `message(s)`, `body`, `preview`, `snippet`, …) and to structured values. It answers `2xx {ok:true, runtimeSession}` only once the notice has been accepted into the agent inbox, whether still queued or already claimed by a turn. Failures use the contract's classes: `auth_revoked` (401), `protocol_mismatch` (400/405), `no_session` (503 with `retryAfterMs` while no session is attached), `injection_failed` (500).
 
-**Coalescing.** A wake that arrives while an earlier notice is still unclaimed in the inbox is acknowledged without a new notice, because that notice's check drains everything. When no notice is waiting, the first wake is injected at once. Wakes that follow within `debounceMs` are merged: they get one notice when the window closes, and each of their POSTs is answered then.
+**Coalescing.** A wake that arrives while an earlier notice is still unclaimed in the inbox is acknowledged without a new notice, because that notice's check drains everything. When no notice is waiting, the first wake is injected at once. Wakes that follow within `debounceMs` are merged: they get one notice when the window closes, and each of their POSTs is answered then. The window runs on a monotonic clock, so a wall-clock correction cannot stretch it.
+
+**Acknowledged wakes survive a stop.** Disposing an agent cancels a notice still queued in its inbox and interrupts a running turn. Whenever the plugin attaches a session (at startup, or when re-attaching after an external dispose), it reads the log. If the latest outcome is an open turn, a turn ended `interrupted`/`aborted`/`error`, or queued input canceled by a dispose, it queues one fresh notice at once. The bridge's reconciliation would otherwise take up to about two minutes. A POST still held by the debounce window at disposal is answered `503 no_session`, so the bridge keeps that hint.
 
 **Orientation.** One agent-scoped system-prompt section, `raft:orientation`. It is byte-stable except for the profile slug and covers: identity (`raft profile show`); reading `raft manual get raft-cli-overview --intent … --reason …`; message bodies only via `raft message check`/`read`; every reply via `raft message send --target <source target>`, because plain text reaches nobody; claiming work with `raft task claim`; earlier conversation lives in Raft (`raft message read`/`search`); never printing or relaying credentials.
 
@@ -122,7 +124,7 @@ raft agent bridge --json --wake-adapter wake-channel --wake-channel-endpoint htt
   --runtime-session <current session> --expected-agent <id> [--poll-interval-ms <n>]
 ```
 
-The child's environment adds `RAFT_PROFILE` and `SLOCK_PROFILE` (same value), `RAFT_CHANNEL_TOKEN` and `RAFT_EXPECTED_AGENT_ID`. The token is never on argv. NDJSON output goes to the DSH logger: routine events at debug, failures at warn, `bridge_fatal` at error. Any exit is followed by a restart with exponential backoff. A child that stayed up for 60 s resets the backoff. Restarts stop, with an error log, after `bridge_fatal` (including revoked auth) or a configuration or identity code: `BRIDGE_IDENTITY_MISMATCH`, `BRIDGE_EXPECTED_AGENT_REQUIRED`, `PROFILE_ENV_CONFLICT`, `PROFILE_FILE_UNREADABLE`, `INVALID_AGENT_TOKEN`, `INVALID_ARG`, `BRIDGE_REQUIRES_PROFILE`. Rotation does not restart the bridge. The CLI prefers the `runtimeSession` in each wake answer over `--runtime-session`, so `--runtime-session` only seeds the next spawn.
+The child's environment adds `RAFT_PROFILE` and `SLOCK_PROFILE` (same value), `RAFT_CHANNEL_TOKEN` and `RAFT_EXPECTED_AGENT_ID`. The token is never on argv. NDJSON output goes to the DSH logger: routine events at debug, failures at warn, `bridge_fatal` at error. Any exit is followed by a restart with exponential backoff. A child that stayed up for 60 s resets the backoff. The CLI emits `bridge_fatal` for every error that is not `SERVER_5XX`, including transient refusals such as HTTP 429. Such a `bridge_fatal` is logged at error level and then restarted with backoff. Restarts stop for good, with an error log, only on revoked auth (401/403, `unauthorized`, `forbidden`, `revoked`) or on a configuration or identity code: `BRIDGE_IDENTITY_MISMATCH`, `BRIDGE_EXPECTED_AGENT_REQUIRED`, `BRIDGE_REQUIRES_PROFILE`, `PROFILE_ENV_CONFLICT`, `PROFILE_FILE_UNREADABLE`, `PROFILE_FILE_INVALID`, `PROFILE_MANAGED_CONTEXT_CONFLICT`, `MISSING_AGENT_ID`, `MISSING_SERVER_URL`, `MISSING_TOKEN`, `INVALID_AGENT_TOKEN`, `INVALID_ARG`. Rotation does not restart the bridge. The CLI prefers the `runtimeSession` in each wake answer over `--runtime-session`, so `--runtime-session` only seeds the next spawn.
 
 **Activity (`raft-activity.v1`, at-most-once).** DSH session events feed a bounded queue. The bridge drains it with `GET /activity/drain?max=N` and gets `{schema: "raft-activity-drain.v1", events, dropped}`. Events use only the fields the Raft server accepts.
 
@@ -137,7 +139,7 @@ The child's environment adds `RAFT_PROFILE` and `SLOCK_PROFILE` (same value), `R
 
 `toolInput`/`toolOutput` are redacted (known token, `key: value` credentials, bearer tokens, common token prefixes). They are capped at 4096 chars with a `\n[truncated]` marker, per-field `…Truncated` flags and an event-level `truncated` flag. Assistant text and reasoning are never reported. `POST /activity` accepts externally built events, rejects unknown fields and re-caps content. With `activity.enabled: false` the drain stays valid and empty.
 
-**Process hygiene.** The plugin never writes to stdout; everything goes through the DSH logger. Every async path is guarded. Disposal stops the bridge (SIGTERM, then SIGKILL after 2 s), closes the endpoint, disposes the agents and clears timers.
+**Process hygiene.** The plugin never writes to stdout; everything goes through the DSH logger. Every async path is guarded. Disposal runs in this order. First the runtime: held wakes get 503, `SessionEnd` is queued and the agents are disposed. Then the bridge stops (SIGTERM, then SIGKILL after 2 s). Next, one `raft agent bridge --once` pass (poll mode, at most 5 s) forwards `SessionEnd`, so Raft shows the agent offline rather than ready. Last, the endpoint closes and timers are cleared.
 
 ## Status
 
@@ -157,6 +159,8 @@ The tests run a real DSH agent loop, with JSONL persistence where needed, agains
 ```sh
 RAFT_LIVE_PROFILE=<slug> RAFT_LIVE_AGENT_ID=<agent id> npx vitest run tests/live-bridge.spec.ts
 ```
+
+With `RAFT_LIVE_ACTIVITY=1` as well, a second check turns activity on. It waits for a real `/activity/drain` → server forward (the stream bridge drains on each server heartbeat, about every 25 s) and checks that the dispose flush forwards `SessionEnd`. This changes the Agent's activity shown in Raft.
 
 ## License
 

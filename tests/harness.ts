@@ -120,6 +120,8 @@ export interface FakeRaftRecord {
   env: Record<string, string | undefined>
   event?: string
   answers?: Array<{ status: number; body: Record<string, unknown> }>
+  /** `--once` flush: the drain answer it received. */
+  drained?: { schema: string; events: Array<Record<string, unknown>>; dropped: number }
 }
 
 /** Records the fake raft executable appended to its log file. */
