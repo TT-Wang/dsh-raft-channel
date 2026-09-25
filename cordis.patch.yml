@@ -1,0 +1,4 @@
+# Raft external-agent channel: one persistent agent session woken by `raft agent bridge`.
+- insert:
+    - id: raft-channel
+      name: '@dsh-external/dsh-raft-channel'
