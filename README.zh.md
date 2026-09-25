@@ -38,7 +38,7 @@ dsh --profile <name>
 
 ## 配置
 
-`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`agentPreset`（默认取预设注册表当前的默认预设；仅在组合了 `ctx.agentPresets` 时生效）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
+`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`agentPreset`（默认取预设注册表当前的默认预设；仅在组合了 `ctx.agentPresets` 时生效）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`、`sweep.{enabled=true,intervalMs=60000(至少 15000),lookbackMs=900000,targets}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
 
 ## 行为要点
 
@@ -50,6 +50,7 @@ dsh --profile <name>
 - 状态文件 `<DSH_HOME>/raft-channel/<profile>.json` 以原子方式写入，重启后按它恢复同一个会话。某个 turn 结束时，若轮数或历史长度超过阈值，就切换到 `<prefix>-<n+1>`。尚未被领取的提示会随之迁到新会话，旧会话仍可恢复。
 - bridge 的启动参数带 `--runtime-session` 和 `--expected-agent`，token 只通过环境变量 `RAFT_CHANNEL_TOKEN` 传给子进程。子进程退出后按指数退避重启。CLI 对所有非 5xx 错误都会发 `bridge_fatal`（包括 429 这类暂时性拒绝），这种情况照样退避重启。只有鉴权被撤销（401/403）或配置、身份类错误码（如 `BRIDGE_IDENTITY_MISMATCH`、`PROFILE_FILE_INVALID`）才会永久停止重启，并写错误日志。
 - activity 的来源是 DSH 会话里的 turn 事件和工具事件，字段与 Raft 服务端接受的完全一致。工具内容先脱敏，再截断到 4096 字符并打上截断标记。模型的思考和回复文本不会上报。
+- 频道 @提及扫描：Raft 服务端的外部 agent 收件箱只存在单个进程的内存里（`agentOrchestrator.ts:2028`），请求没有副本亲和；而 #all 是虚拟频道（`channelService.ts:3249-3255`），持久化的收件箱重建（`messageService.ts:4304-4357`）和 ack 游标推进（`channelService.ts:15274-15297`）却都 join 真实的 `channel_agents` 表，新 agent 在那里没有 #all 的行。因此 #all 里的 @提及可能既收不到唤醒，`raft message check` 也拿不到。插件为此在启动时和每隔 `sweep.intervalMs` 跑一次只读的 `raft message search --query "@<handle>" --sort recent --after <iso>`（search 不推进已读游标；默认页的 `raft message read` 会推进，见 `internalAgentApi.ts:2150-2162`）。check 结果里出现过的、已见过的、自己发的、私信里的都会跳过，剩下的合成一条不含正文的 `[Raft mention]` 提示（source kind `user`，最多列 5 条，其余计为 `+N more`；未领取的提示会合并，不会叠加）。已见集合和水位线原子写入 `<DSH_HOME>/raft-channel/<profile>-mentions.json`。CLI 失败或超时（10 秒）只记 warn，下个周期重试。
 - 插件从不写 stdout，所有输出都走 DSH logger。dispose 时先停运行时（挂起的唤醒回 503，排入 `SessionEnd`），再停 bridge，然后用一次 `raft agent bridge --once` 把 `SessionEnd` 转发出去（Raft 上显示离线），最后关端点和所有定时器。
 
 完整说明见 [README.md](README.md)。

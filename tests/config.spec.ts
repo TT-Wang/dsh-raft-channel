@@ -19,8 +19,10 @@ describe('config', () => {
       bridge: { enabled: true, pollIntervalMs: undefined, restartBackoffMs: [1000, 60_000] },
       activity: { enabled: true, queueCap: 500 },
       rotate: { maxTurns: 300, maxHistoryChars: 1_500_000 },
+      sweep: { enabled: true, intervalMs: 60_000, lookbackMs: 900_000, targets: undefined },
       stateFile: '/tmp/dsh-home/raft-channel/slicey-dsh.json',
       exportProfile: false,
+      mentionsFile: '/tmp/dsh-home/raft-channel/slicey-dsh-mentions.json',
     })
   })
 
@@ -29,6 +31,7 @@ describe('config', () => {
     expect(() => resolveConfig({ profile: 'p', expectedAgentId: ID, bridge: { enable: false } }, {}, HOME)).toThrow(/bridge\.enable; valid keys: enabled, pollIntervalMs, restartBackoffMs/)
     expect(() => resolveConfig({ profile: 'p', expectedAgentId: ID, rotate: { turns: 1 } }, {}, HOME)).toThrow(/rotate\.turns; valid keys: maxTurns, maxHistoryChars/)
     expect(() => resolveConfig({ profile: 'p', expectedAgentId: ID, activity: { cap: 1 } }, {}, HOME)).toThrow(/activity\.cap/)
+    expect(() => resolveConfig({ profile: 'p', expectedAgentId: ID, sweep: { interval: 1 } }, {}, HOME)).toThrow(/sweep\.interval; valid keys: enabled, intervalMs, lookbackMs, targets/)
   })
 
   it('applies the CLI profile rules', () => {
@@ -58,5 +61,19 @@ describe('config', () => {
     expect(resolveConfig(base, {}, HOME).agentPreset).toBeUndefined()
     expect(resolveConfig({ ...base, agentPreset: ' standard ' }, {}, HOME).agentPreset).toBe('standard')
     expect(() => resolveConfig({ ...base, agentPreset: '' }, {}, HOME)).toThrow(/agentPreset must be a non-empty string/)
+  })
+
+  it('validates the mention sweep and keeps it on without the bridge unless disabled', () => {
+    const base = { profile: 'p', expectedAgentId: ID }
+    expect(resolveConfig({ profile: 'p', bridge: { enabled: false } }, {}, HOME).sweep.enabled).toBe(true)
+    expect(resolveConfig({ ...base, sweep: { enabled: false } }, {}, HOME).sweep.enabled).toBe(false)
+    expect(() => resolveConfig({ ...base, sweep: { intervalMs: 14_999 } }, {}, HOME)).toThrow(/sweep\.intervalMs must be an integer in \[15000,/)
+    expect(() => resolveConfig({ ...base, sweep: { lookbackMs: -1 } }, {}, HOME)).toThrow(/sweep\.lookbackMs/)
+    expect(() => resolveConfig({ ...base, sweep: { enabled: 'yes' } }, {}, HOME)).toThrow(/sweep\.enabled must be a boolean/)
+    expect(resolveConfig({ ...base, sweep: { targets: [' #all ', '#dev:0ffb9edf'] } }, {}, HOME).sweep.targets).toEqual(['#all', '#dev:0ffb9edf'])
+    expect(() => resolveConfig({ ...base, sweep: { targets: [] } }, {}, HOME)).toThrow(/sweep\.targets must be a non-empty list/)
+    expect(() => resolveConfig({ ...base, sweep: { targets: 'all' } }, {}, HOME)).toThrow(/sweep\.targets must be a non-empty list/)
+    expect(() => resolveConfig({ ...base, sweep: { targets: ['dm:@alice'] } }, {}, HOME)).toThrow(/is not a channel target/)
+    expect(() => resolveConfig({ ...base, sweep: { targets: ['all'] } }, {}, HOME)).toThrow(/is not a channel target/)
   })
 })

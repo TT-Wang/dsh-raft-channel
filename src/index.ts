@@ -5,7 +5,9 @@
  * a localhost endpoint the supervised `raft agent bridge` child POSTs
  * content-free wakes to, and a fixed wake notice injected into one persistent
  * agent session. The agent reads and replies through the `raft` CLI itself;
- * message bodies never cross this process.
+ * message bodies never reach the model through this process. The mention
+ * sweep reads `raft message search` previews only to confirm a mention and
+ * names what it found by target and short id.
  */
 import { randomBytes } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
@@ -17,12 +19,18 @@ import type {} from '@deepseek-ai/dsh-session'
 import { ActivityQueue } from './activity.js'
 import { BridgeSupervisor, type BridgeStatus } from './bridge.js'
 import { isLoopbackHost, resolveConfig, type Config, type ResolvedConfig } from './config.js'
+import { MentionSweeper, checkShortIds, type SweepOutcome } from './mentions.js'
 import { RaftRuntime } from './runtime.js'
 import { startChannelServer, type ChannelServer } from './server.js'
 
 export type { Config, ResolvedConfig } from './config.js'
 export { RaftChannelConfigError, resolveConfig } from './config.js'
-export { WAKE_NOTICE, orientationText, ORIENTATION_SECTION } from './text.js'
+export { WAKE_NOTICE, orientationText, ORIENTATION_SECTION, mentionNotice, MENTION_NOTICE_LIST } from './text.js'
+export type { MentionRef } from './text.js'
+export {
+  MentionSweeper, MENTIONS_SCHEMA, SEEN_CAP, CLI_TIMEOUT_MS, checkShortIds, mentionsHandle, parseProfile, parseSearchOutput, parseSearchTime, sourceTarget,
+} from './mentions.js'
+export type { Mention, SearchResult, SelfProfile, SweepOutcome, SweeperOptions } from './mentions.js'
 export { ActivityQueue, ActivityRecorder, capContent, redactCredentials, validateActivityEvent, CONTENT_CAP } from './activity.js'
 export type { ActivityEvent, DrainResult } from './activity.js'
 export { BridgeSupervisor, buildBridgeArgs, buildBridgeEnv, bridgeSpawnPlan, TERMINAL_ERROR_CODES } from './bridge.js'
@@ -51,6 +59,7 @@ export interface RaftChannelStatus {
   turns: number
   bridge?: BridgeStatus
   activityQueued?: number
+  mentionSweep?: { runs: number; seen: number; lastError?: string }
   error?: string
 }
 
@@ -66,6 +75,7 @@ export class RaftChannel extends Service {
   private readonly activity: ActivityQueue | undefined
   private server: ChannelServer | undefined
   private bridge: BridgeSupervisor | undefined
+  private readonly sweeper: MentionSweeper | undefined
   private state: RaftChannelStatus['state'] = 'starting'
   private failure: string | undefined
   private readonly ready: Promise<void>
@@ -82,7 +92,26 @@ export class RaftChannel extends Service {
     // Minted per process, handed only to the bridge child through its env.
     const token = randomBytes(32).toString('base64url')
     this.activity = settings.activity.enabled ? new ActivityQueue(settings.activity.queueCap) : undefined
-    this.runtime = new RaftRuntime({ ctx, config: settings, logger, activity: this.activity, secrets: () => [token] })
+    this.runtime = new RaftRuntime({
+      ctx,
+      config: settings,
+      logger,
+      activity: this.activity,
+      secrets: () => [token],
+      onCheckOutput: text => { this.sweeper?.markChecked(checkShortIds(text)) },
+    })
+    this.sweeper = settings.sweep.enabled
+      ? new MentionSweeper({
+        command: settings.raftBin,
+        profile: settings.profile,
+        file: settings.mentionsFile,
+        intervalMs: settings.sweep.intervalMs,
+        lookbackMs: settings.sweep.lookbackMs,
+        targets: settings.sweep.targets,
+        logger,
+        notify: (mentions, handle) => this.runtime.mention(mentions, handle),
+      })
+      : undefined
 
     // The agent's shell inherits this environment; when the profile came only
     // from config, export it so `raft` in that shell acts as the same identity.
@@ -143,6 +172,8 @@ export class RaftChannel extends Service {
       } else {
         logger.warn('raft-channel: bridge.enabled is false; nothing will POST wakes (the endpoint token is private to this process)')
       }
+      // Channel mentions Raft's inbox may drop: sweep once now, then every interval.
+      this.sweeper?.start()
       this.state = 'ready'
     }
     this.ready = start().catch((error: unknown) => {
@@ -154,6 +185,7 @@ export class RaftChannel extends Service {
     ctx.effect(() => async () => {
       disposed = true
       this.state = 'disposed'
+      await this.sweeper?.stop().catch(() => undefined)
       // The runtime first: it answers held and new wakes 503 (the bridge keeps
       // those hints), queues SessionEnd and disposes the agents. Then the
       // bridge, then one `--once` pass so SessionEnd reaches the server (Raft
@@ -174,6 +206,14 @@ export class RaftChannel extends Service {
     return this.ready
   }
 
+  /**
+   * Run one mention sweep now (or join the one running).
+   * @returns its outcome; `ok: false` with `error: 'disabled'` when `sweep.enabled` is false.
+   */
+  sweepMentions(): Promise<SweepOutcome> {
+    return this.sweeper?.sweep() ?? Promise.resolve({ ok: false, notified: 0, error: 'disabled' })
+  }
+
   status(): RaftChannelStatus {
     return {
       state: this.state,
@@ -183,6 +223,7 @@ export class RaftChannel extends Service {
       ...this.runtime.runtimeSession() === undefined ? {} : { runtimeSession: this.runtime.runtimeSession() },
       ...this.bridge === undefined ? {} : { bridge: this.bridge.getStatus() },
       ...this.activity === undefined ? {} : { activityQueued: this.activity.size },
+      ...this.sweeper === undefined ? {} : { mentionSweep: this.sweeper.status() },
       ...this.failure === undefined ? {} : { error: this.failure },
     }
   }

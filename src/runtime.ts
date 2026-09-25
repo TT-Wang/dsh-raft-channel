@@ -26,7 +26,7 @@ import {
 } from './presets.js'
 import type { WakeOutcome } from './server.js'
 import { readState, STATE_SCHEMA, writeState } from './state.js'
-import { ORIENTATION_SECTION, WAKE_NOTICE, orientationText } from './text.js'
+import { ORIENTATION_SECTION, WAKE_NOTICE, mentionNotice, orientationText, type MentionRef } from './text.js'
 
 /** Placement of the orientation: after the deployment persona body, before its suffix (10200). */
 export const ORIENTATION_ORDER = 10_100
@@ -120,6 +120,16 @@ export interface RuntimeOptions {
   activity: ActivityQueue | undefined
   /** Values redacted from activity content (the wake token). */
   secrets: () => readonly string[]
+  /** Output of each `raft message check` tool call the agent ran (for the mention sweep). */
+  onCheckOutput?: (text: string) => void
+}
+
+/** A mention notice not yet claimed by a turn, with what it names (merged or moved as a whole). */
+interface PendingMention {
+  sessionId: SessionId
+  messageId: MessageId
+  mentions: MentionRef[]
+  handle: string
 }
 
 type Decision = { outcome: WakeOutcome } | { wait: Promise<WakeOutcome> }
@@ -152,7 +162,13 @@ export class RaftRuntime {
   private recoverDelayMs = 1000
   private disposed = false
   private lastSessionId: string | undefined
-  private injecting: { id: MessageId; claimed: boolean } | undefined
+  private injecting: { id: MessageId; claimed: boolean; wake: boolean } | undefined
+  /** The unclaimed mention notice, if any. */
+  private pendingMention: PendingMention | undefined
+  /** A mention notice an external dispose canceled, re-queued on re-attach. */
+  private orphanMention: Omit<PendingMention, 'sessionId' | 'messageId'> | undefined
+  /** `raft message check` tool calls awaiting their result, by session and call id. */
+  private readonly checkCalls = new Set<string>()
   /**
    * The running turn that one of our notices started, until it ends, and
    * whether it has started a `raft message check` call yet. While it has not,
@@ -530,22 +546,58 @@ export class RaftRuntime {
    * any other kind would stay raw in every later request.
    * @throws when the agent is gone or the inbox did not accept the message.
    */
-  private inject(live: LiveSession): void {
+  private inject(live: LiveSession, text = WAKE_NOTICE): { id: MessageId; claimed: boolean } {
     const agent = live.handle.agent
     if (this.options.ctx.agents.get(live.id) !== agent) throw new Error(`agent ${live.id} is no longer live`)
     live.selection.current = this.currentSelection()
-    const message = createUserMessage({ content: [{ type: 'text', text: WAKE_NOTICE }], source: { kind: 'user' } })
+    const wake = text === WAKE_NOTICE
+    const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
     // An idle driver claims the message synchronously inside followup(), so
     // "accepted" means still queued or already claimed by a turn.
-    this.injecting = { id: message.id, claimed: false }
+    const injecting = { id: message.id, claimed: false, wake }
+    this.injecting = injecting
     try {
       agent.followup(message)
-      const accepted = this.injecting.claimed || agent.inbox.nextTurn.some(queued => queued.id === message.id)
+      const accepted = injecting.claimed || agent.inbox.nextTurn.some(queued => queued.id === message.id)
       if (!accepted) throw new Error('the follow-up did not enter the agent inbox')
     } finally {
       this.injecting = undefined
     }
-    this.pending = { sessionId: live.id, messageId: message.id }
+    if (wake) this.pending = { sessionId: live.id, messageId: message.id }
+    return { id: message.id, claimed: injecting.claimed }
+  }
+
+  /**
+   * Queue one mention notice naming `mentions` (from the mention sweep). A
+   * mention notice still unclaimed in the inbox is replaced by one naming its
+   * mentions and these, so sweeps never stack notices. Wake coalescing does
+   * not cover mentions: `raft message check` is exactly what may miss them.
+   * @returns whether the notice is in (or already claimed from) the inbox.
+   */
+  mention(mentions: readonly MentionRef[], handle: string): Promise<boolean> {
+    if (this.disposed || mentions.length === 0) return Promise.resolve(false)
+    return this.serial(async () => {
+      const live = this.current
+      if (live === undefined || this.disposed) return false
+      let merged: MentionRef[] = [...mentions]
+      const pending = this.pendingMention
+      if (pending !== undefined && pending.sessionId === live.id && live.handle.agent.inbox.remove(pending.messageId)) {
+        merged = [...pending.mentions, ...mentions.filter(m => !pending.mentions.some(p => p.target === m.target && p.shortId === m.shortId))]
+      }
+      this.pendingMention = undefined
+      return this.injectMention(live, merged, handle)
+    })
+  }
+
+  private injectMention(live: LiveSession, mentions: MentionRef[], handle: string): boolean {
+    try {
+      const { id, claimed } = this.inject(live, mentionNotice(mentions, handle))
+      if (!claimed) this.pendingMention = { sessionId: live.id, messageId: id, mentions, handle }
+      return true
+    } catch (error) {
+      this.options.logger.error(`raft-channel: mention notice injection into ${live.id} failed: ${errorText(error)}`)
+      return false
+    }
   }
 
   /**
@@ -557,6 +609,8 @@ export class RaftRuntime {
     const injecting = this.injecting
     const ours = injecting?.id === messageId
     if (ours) injecting!.claimed = true
+    if (this.pendingMention?.messageId === messageId) this.pendingMention = undefined
+    if (ours && !injecting!.wake) return
     const pending = this.pending
     if (ours || pending !== undefined && pending.sessionId === sessionId && pending.messageId === messageId) {
       this.noticeTurn = { sessionId, turn, checked: false }
@@ -581,6 +635,7 @@ export class RaftRuntime {
 
   /** Mark the notice-started turn checked at its first `raft message check` call; forget it when it ends. */
   private trackCheck(sessionId: string, event: SessionEvent): void {
+    this.trackCheckOutput(sessionId, event)
     const turn = this.noticeTurn
     if (turn === undefined || turn.sessionId !== sessionId) return
     if (event.type === 'tool/call') {
@@ -591,6 +646,27 @@ export class RaftRuntime {
       }
     } else if (event.type === 'turn/end') {
       if ((event as SessionEvent<'turn/end'>).data.turn === turn.turn) this.noticeTurn = undefined
+    }
+  }
+
+  /** Hand each `raft message check` result's text to `onCheckOutput`. */
+  private trackCheckOutput(sessionId: string, event: SessionEvent): void {
+    const onCheckOutput = this.options.onCheckOutput
+    if (onCheckOutput === undefined) return
+    if (event.type === 'tool/call') {
+      const data = (event as SessionEvent<'tool/call'>).data
+      if (isRaftCheckCall(data.arguments)) this.checkCalls.add(`${sessionId}\u0000${data.callId}`)
+    } else if (event.type === 'tool/result') {
+      const data = (event as SessionEvent<'tool/result'>).data
+      if (!this.checkCalls.delete(`${sessionId}\u0000${data.message.toolCallId}`)) return
+      const text = data.message.content.map(block => block.type === 'text' ? block.text : '').join('\n')
+      try {
+        onCheckOutput(text)
+      } catch (error) {
+        this.options.logger.warn(`raft-channel: check output handling failed: ${errorText(error)}`)
+      }
+    } else if (event.type === 'turn/end') {
+      for (const key of this.checkCalls) if (key.startsWith(`${sessionId}\u0000`)) this.checkCalls.delete(key)
     }
   }
 
@@ -625,6 +701,11 @@ export class RaftRuntime {
         this.options.logger.error(`raft-channel: could not move the pending wake notice to ${next.id}: ${errorText(error)}; the bridge's reconciliation will re-wake`)
       }
     }
+    const mention = this.pendingMention
+    if (mention !== undefined && mention.sessionId === live.id) {
+      this.pendingMention = undefined
+      if (live.handle.agent.inbox.remove(mention.messageId)) this.injectMention(next, mention.mentions, mention.handle)
+    }
     this.options.logger.info(`raft-channel: rotated ${live.id} -> ${next.id} (${live.turns} turns${turnsOver ? '' : `, ${chars} history chars`})`)
     this.retire(live)
   }
@@ -651,6 +732,10 @@ export class RaftRuntime {
     this.current = undefined
     this.pending = undefined
     if (this.noticeTurn?.sessionId === live.id) this.noticeTurn = undefined
+    // The dispose canceled an unclaimed mention notice; queue it again on re-attach.
+    const mention = this.pendingMention
+    if (mention !== undefined && mention.sessionId === live.id) this.orphanMention = { mentions: mention.mentions, handle: mention.handle }
+    this.pendingMention = undefined
     this.scheduleRecover(live)
   }
 
@@ -674,6 +759,9 @@ export class RaftRuntime {
         // turn; the resumed log (or, in memory, the lost one) shows which.
         const events = persistent ? live.handle.agent.session.snapshotEvents() : lost.handle.agent.session.snapshotEvents()
         if (needsRewake(events)) this.rewake(live, 'the external dispose')
+        const orphan = this.orphanMention
+        this.orphanMention = undefined
+        if (orphan !== undefined) this.injectMention(live, orphan.mentions, orphan.handle)
       }).catch((error: unknown) => {
         this.recoverDelayMs = Math.min(this.recoverDelayMs * 2, 60_000)
         this.options.logger.error(`raft-channel: re-attaching ${lost.id} failed: ${errorText(error)}; retrying in ${this.recoverDelayMs}ms`)

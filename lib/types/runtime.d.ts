@@ -6,6 +6,7 @@ import { type ActivityQueue } from './activity.js';
 import type { ResolvedConfig } from './config.js';
 import type { BridgeLogger } from './bridge.js';
 import type { WakeOutcome } from './server.js';
+import { type MentionRef } from './text.js';
 /** Placement of the orientation: after the deployment persona body, before its suffix (10200). */
 export declare const ORIENTATION_ORDER = 10100;
 /** Whether one shell command line runs `raft message check`. */
@@ -31,6 +32,8 @@ export interface RuntimeOptions {
     activity: ActivityQueue | undefined;
     /** Values redacted from activity content (the wake token). */
     secrets: () => readonly string[];
+    /** Output of each `raft message check` tool call the agent ran (for the mention sweep). */
+    onCheckOutput?: (text: string) => void;
 }
 export declare class RaftRuntime {
     private readonly options;
@@ -47,6 +50,12 @@ export declare class RaftRuntime {
     private disposed;
     private lastSessionId;
     private injecting;
+    /** The unclaimed mention notice, if any. */
+    private pendingMention;
+    /** A mention notice an external dispose canceled, re-queued on re-attach. */
+    private orphanMention;
+    /** `raft message check` tool calls awaiting their result, by session and call id. */
+    private readonly checkCalls;
     /**
      * The running turn that one of our notices started, until it ends, and
      * whether it has started a `raft message check` call yet. While it has not,
@@ -128,6 +137,15 @@ export declare class RaftRuntime {
      */
     private inject;
     /**
+     * Queue one mention notice naming `mentions` (from the mention sweep). A
+     * mention notice still unclaimed in the inbox is replaced by one naming its
+     * mentions and these, so sweeps never stack notices. Wake coalescing does
+     * not cover mentions: `raft message check` is exactly what may miss them.
+     * @returns whether the notice is in (or already claimed from) the inbox.
+     */
+    mention(mentions: readonly MentionRef[], handle: string): Promise<boolean>;
+    private injectMention;
+    /**
      * `agent/inbox/claimed` feed: marks a notice claimed during its own
      * followup(), and notes the turn one of our notices starts. Notices are
      * queued as next-turn input, so they are claimed only at a turn's start.
@@ -140,6 +158,8 @@ export declare class RaftRuntime {
     onSessionEvent(session: Session, event: SessionEvent): void;
     /** Mark the notice-started turn checked at its first `raft message check` call; forget it when it ends. */
     private trackCheck;
+    /** Hand each `raft message check` result's text to `onCheckOutput`. */
+    private trackCheckOutput;
     private historyChars;
     private maybeRotate;
     private retire;

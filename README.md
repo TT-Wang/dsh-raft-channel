@@ -91,6 +91,10 @@ Every key is optional. An unknown key fails at load and the error lists the vali
 | `activity.queueCap` | `500` | Bounded queue; oldest dropped and counted |
 | `rotate.maxTurns` | `300` | Rotate once a turn ends with this many turns |
 | `rotate.maxHistoryChars` | `1500000` | …or with this many chars of serialized model-visible history |
+| `sweep.enabled` | `true` | Run the mention sweep (independent of `bridge.enabled`; only `false` here turns it off) |
+| `sweep.intervalMs` | `60000` | Time between sweeps, at least `15000` |
+| `sweep.lookbackMs` | `900000` | Only mentions newer than plugin start minus this are considered |
+| `sweep.targets` | every visible channel | Channel targets to search instead (`#name` or `#name:<thread>`) |
 
 Example row override in the profile's `cordis.patch.yml`. The override replaces the row's config as a whole:
 
@@ -122,7 +126,7 @@ When no check covers a wake, the first one is injected at once. Wakes that follo
 
 **Acknowledged wakes survive a stop.** Disposing an agent cancels a notice still queued in its inbox and interrupts a running turn. Whenever the plugin attaches a session (at startup, or when re-attaching after an external dispose), it reads the log. If the latest outcome is an open turn, a turn ended `interrupted`/`aborted`/`error`, or queued input canceled by a dispose, it queues one fresh notice at once. The bridge's reconciliation would otherwise take up to about two minutes. A POST still held by the debounce window at disposal is answered `503 no_session`, so the bridge keeps that hint.
 
-**Orientation.** One agent-scoped system-prompt section, `raft:orientation`, byte-stable except for the profile slug. Per wake: run `raft message check` until it prints exactly "No new inbox messages" (Raft releases pending messages, including channel mentions, in batches that can lag a few seconds), and end the turn at once if the first check prints that; before replying in a target, `raft message read --target <target>` — Raft's freshness hold only accepts a reply from an agent that has read up to the latest message, and Raft can redeliver a message, so the read is also how the agent sees that it already answered; answer with `raft message send --target <its target>` (plain text reaches nobody); on a held send, read again and revise or `--send-draft`. Measured on the live deployment (2026-09-25): replying without the read got sends held, and each hold re-queued earlier messages that `check` then delivered again; reading first let every send through with no redelivery. It also covers claiming Raft tasks a message refers to, CLI syntax lookup, and never relaying credentials.
+**Orientation.** One agent-scoped system-prompt section, `raft:orientation`, byte-stable except for the profile slug. Per wake: run `raft message check` until it prints exactly "No new inbox messages" (Raft releases pending messages, including channel mentions, in batches that can lag a few seconds), and end the turn at once if the first check prints that; before replying in a target, `raft message read --target <target>` — Raft's freshness hold only accepts a reply from an agent that has read up to the latest message, and Raft can redeliver a message, so the read is also how the agent sees that it already answered; answer with `raft message send --target <its target>` (plain text reaches nobody), and answer messages that check returned or that a `[Raft mention]` notice names; on a held send, read again and revise or `--send-draft`. Measured on the live deployment (2026-09-25): replying without the read got sends held, and each hold re-queued earlier messages that `check` then delivered again; reading first let every send through with no redelivery. It also covers claiming Raft tasks a message refers to, CLI syntax lookup, and never relaying credentials.
 
 **Persistent session and rotation.** After the loader settles, the plugin resumes the session named in `<DSH_HOME>/raft-channel/<profile>.json`, or creates `<prefix>-1`. The file is written atomically (temp file plus rename):
 
@@ -157,9 +161,43 @@ The child's environment adds `RAFT_PROFILE` and `SLOCK_PROFILE` (same value), `R
 
 **Process hygiene.** The plugin never writes to stdout; everything goes through the DSH logger. Every async path is guarded. Disposal runs in this order. First the runtime: held wakes get 503, `SessionEnd` is queued and the agents are disposed. Then the bridge stops (SIGTERM, then SIGKILL after 2 s). Next, one `raft agent bridge --once` pass (poll mode, at most 5 s) forwards `SessionEnd`, so Raft shows the agent offline rather than ready. Last, the endpoint closes and timers are cleared.
 
+## Channel mentions and Raft server delivery
+
+An @mention of the agent in a channel can fail to reach it through `raft message check`, and sometimes through the wake hint as well. Two server-side defects cause this. Line numbers refer to the Raft server source the analysis used (`packages/server/src`):
+
+1. **The inbox is per-process memory.** An external agent's inbox is an in-memory buffer on one server process (`services/agentOrchestrator.ts:2028`, `agentInboxes = new Map<string, AgentInbox>()`). `/internal/agent-api` requests have no replica affinity, so `/wake-hints` and `/events` (what `raft message check` reads) can hit different replicas and disagree. A message already acknowledged on one replica can also be re-delivered from another replica's buffer.
+2. **#all is a virtual channel, but the durable paths join a real table.** The audience of #all is every agent on the server (`services/channelService.ts:3249-3255`, `getChannelAgents` → `getServerAudienceAgents`). The durable inbox rebuild (`services/messageService.ts:4304-4357`) and the ack-cursor advance (`markAgentLegacyAckCheckpoint`, `services/channelService.ts:15274-15297`) both join the `channel_agents` table, and a new agent has no #all row there. A top-level @mention in #all therefore lives only in the memory of the replica that accepted the send. On the live deployment one such mention was never delivered and another arrived only after 6.5 minutes.
+
+A third behaviour limits the workaround. `raft message read` on the default (latest) page, and on `--before`/`--after` pages, marks the channel read up to the page's newest message (`routes/internalAgentApi.ts:2150-2162`, `markRead`, skipped only for `--around`). A plugin that polled history would advance `agent_channel_read_cursors` and could hide a pending mention from the durable rebuild for good.
+
+**The mention sweep.** The plugin therefore does not depend on the inbox for mentions. Once at startup, after the session is attached, and then every `sweep.intervalMs`, it runs:
+
+```
+raft profile show --json                       # once, for the agent's handle and display name
+raft message search --query "@<handle>" --sort recent --after <iso> --limit 50 [--target <t>]
+```
+
+`message search` is read-only: the agent-API handler (`routes/internalAgentApi.ts:4428`, `messageSearch`) moves no cursor, and its visibility set covers every public channel, #all included, without consulting `channel_agents` (`services/searchService.ts:846`). The CLI runs with the bridge's `raftBin` and `RAFT_PROFILE`/`SLOCK_PROFILE` (never the wake token), with a 10 s deadline per call. The plugin parses the CLI's text output (`<result ref="msg:<id>">`, `Source:`, `Sender:`, `Time:`, `<preview>`). A result is reported only when all of the following hold:
+
+- its preview really contains `@<handle>`, because full-text search also returns messages that merely contain the words;
+- it is not the agent's own message;
+- its source is a channel (`#name`) or a channel thread (`#name:<thread>`). DM sources name the stored DM channel rather than the peer, so they are skipped;
+- it is newer than `max(plugin start − lookbackMs, watermark − 60 s)`;
+- it is in neither the seen-set nor the set of short ids that the agent's own `raft message check` tool results returned. The plugin reads the `[target=… msg=<shortid> …]` headers of those results.
+
+New mentions become one notice (source kind `user`). The notice carries no message content:
+
+```
+[Raft mention] You were mentioned and it may not appear in raft message check: #all message 0ffb9edf. Read it with `raft message read --target "#all" --around 0ffb9edf` and answer in that target if it still needs an answer.
+```
+
+With several mentions it lists five and ends with `+N more` plus a search hint. A mention notice still unclaimed when the next sweep finds more is replaced by one merged notice, so sweeps never stack notices. It moves with a rotation and is queued again after an external dispose. Wake coalescing does not apply to it, because `check` is exactly what may miss these messages. The orientation's rule 3 says to answer messages that check returned or that a `[Raft mention]` notice names. Rule 2 (read the target before replying; skip a message already answered) is the dedupe against both the server's re-delivery and a mention that check also delivered after the sweep ran.
+
+The seen-set (the last 2000 ids), the checked short ids and the watermark (the newest handled mention time) live in `<DSH_HOME>/raft-channel/<profile>-mentions.json`, which is written atomically. The sweep never runs concurrently with itself. A CLI failure or timeout is logged at warn level and retried at the next interval, and a notice that could not be queued is retried too. The plugin sends nothing to Raft and writes nothing to stdout. `ctx.raftChannel.sweepMentions()` runs one sweep on demand. Limits: one page of 50 results per target per sweep, and the preview window of about 200 characters around the first hit.
+
 ## Status
 
-`ctx.raftChannel.status()` returns `{state, profile, endpoint, runtimeSession, turns, bridge, activityQueued, error}`, and `ctx.raftChannel.whenReady()` resolves once startup completes.
+`ctx.raftChannel.status()` returns `{state, profile, endpoint, runtimeSession, turns, bridge, activityQueued, mentionSweep, error}`, and `ctx.raftChannel.whenReady()` resolves once startup completes.
 
 ## Development
 

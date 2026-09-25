@@ -18,6 +18,16 @@ export interface RotateConfig {
     /** ...or once the serialized model-visible history reaches this many chars (default 1_500_000). */
     maxHistoryChars?: number;
 }
+export interface SweepConfig {
+    /** Run the mention sweep (default true, whether or not the bridge runs). */
+    enabled?: boolean;
+    /** Time between sweeps in ms (default 60000, at least 15000). */
+    intervalMs?: number;
+    /** Only mentions newer than plugin start minus this many ms are considered (default 900000). */
+    lookbackMs?: number;
+    /** Channel targets (`#name` or `#name:thread`) to search; default every channel the agent can see. */
+    targets?: string[];
+}
 export interface Config {
     /** Raft profile slug; defaults to `RAFT_PROFILE` (or the legacy `SLOCK_PROFILE`). */
     profile?: string;
@@ -44,6 +54,7 @@ export interface Config {
     bridge?: BridgeConfig;
     activity?: ActivityConfig;
     rotate?: RotateConfig;
+    sweep?: SweepConfig;
 }
 export interface ResolvedConfig {
     profile: string;
@@ -69,10 +80,18 @@ export interface ResolvedConfig {
         maxTurns: number;
         maxHistoryChars: number;
     };
+    sweep: {
+        enabled: boolean;
+        intervalMs: number;
+        lookbackMs: number;
+        targets: string[] | undefined;
+    };
     /** Where the current-session pointer lives: `<DSH_HOME>/raft-channel/<profile>.json`. */
     stateFile: string;
     /** True when `profile` came from config while the environment named none; the plugin exports it so the agent's `raft` calls agree. */
     exportProfile: boolean;
+    /** Mention-sweep seen-set and watermark: `<DSH_HOME>/raft-channel/<profile>-mentions.json`. */
+    mentionsFile: string;
 }
 export declare class RaftChannelConfigError extends Error {
     constructor(message: string);

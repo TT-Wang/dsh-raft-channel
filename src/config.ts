@@ -24,6 +24,17 @@ export interface RotateConfig {
   maxHistoryChars?: number
 }
 
+export interface SweepConfig {
+  /** Run the mention sweep (default true, whether or not the bridge runs). */
+  enabled?: boolean
+  /** Time between sweeps in ms (default 60000, at least 15000). */
+  intervalMs?: number
+  /** Only mentions newer than plugin start minus this many ms are considered (default 900000). */
+  lookbackMs?: number
+  /** Channel targets (`#name` or `#name:thread`) to search; default every channel the agent can see. */
+  targets?: string[]
+}
+
 export interface Config {
   /** Raft profile slug; defaults to `RAFT_PROFILE` (or the legacy `SLOCK_PROFILE`). */
   profile?: string
@@ -50,6 +61,7 @@ export interface Config {
   bridge?: BridgeConfig
   activity?: ActivityConfig
   rotate?: RotateConfig
+  sweep?: SweepConfig
 }
 
 export interface ResolvedConfig {
@@ -66,16 +78,22 @@ export interface ResolvedConfig {
   bridge: { enabled: boolean; pollIntervalMs: number | undefined; restartBackoffMs: [number, number] }
   activity: { enabled: boolean; queueCap: number }
   rotate: { maxTurns: number; maxHistoryChars: number }
+  sweep: { enabled: boolean; intervalMs: number; lookbackMs: number; targets: string[] | undefined }
   /** Where the current-session pointer lives: `<DSH_HOME>/raft-channel/<profile>.json`. */
   stateFile: string
   /** True when `profile` came from config while the environment named none; the plugin exports it so the agent's `raft` calls agree. */
   exportProfile: boolean
+  /** Mention-sweep seen-set and watermark: `<DSH_HOME>/raft-channel/<profile>-mentions.json`. */
+  mentionsFile: string
 }
 
-const TOP_KEYS = ['profile', 'expectedAgentId', 'raftBin', 'sessionPrefix', 'cwd', 'host', 'port', 'debounceMs', 'agentPreset', 'bridge', 'activity', 'rotate'] as const
+const TOP_KEYS = ['profile', 'expectedAgentId', 'raftBin', 'sessionPrefix', 'cwd', 'host', 'port', 'debounceMs', 'agentPreset', 'bridge', 'activity', 'rotate', 'sweep'] as const
 const BRIDGE_KEYS = ['enabled', 'pollIntervalMs', 'restartBackoffMs'] as const
 const ACTIVITY_KEYS = ['enabled', 'queueCap'] as const
 const ROTATE_KEYS = ['maxTurns', 'maxHistoryChars'] as const
+const SWEEP_KEYS = ['enabled', 'intervalMs', 'lookbackMs', 'targets'] as const
+/** A channel or channel-thread target; DM sources carry no reliable reply target in search output. */
+const CHANNEL_TARGET = /^#[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9_-]+)?$/
 
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
@@ -132,6 +150,7 @@ export function resolveConfig(raw: unknown, env: Record<string, string | undefin
   const bridge = checkKeys(config.bridge, BRIDGE_KEYS, 'bridge')
   const activity = checkKeys(config.activity, ACTIVITY_KEYS, 'activity')
   const rotate = checkKeys(config.rotate, ROTATE_KEYS, 'rotate')
+  const sweep = checkKeys(config.sweep, SWEEP_KEYS, 'sweep')
 
   // Mirror the CLI: RAFT_PROFILE is canonical, SLOCK_PROFILE a deprecated alias;
   // both set and different is an error, never a silent pick.
@@ -171,6 +190,19 @@ export function resolveConfig(raw: unknown, env: Record<string, string | undefin
 
   const backoff = bridge.restartBackoffMs ?? [1000, 60_000]
   if (!Array.isArray(backoff) || backoff.length !== 2) throw new RaftChannelConfigError('bridge.restartBackoffMs must be [firstMs, maxMs]')
+  let targets: string[] | undefined
+  if (sweep.targets !== undefined) {
+    if (!Array.isArray(sweep.targets) || sweep.targets.length === 0 || sweep.targets.length > 50) {
+      throw new RaftChannelConfigError('sweep.targets must be a non-empty list of at most 50 channel targets')
+    }
+    targets = sweep.targets.map((target: unknown) => {
+      if (typeof target !== 'string' || !CHANNEL_TARGET.test(target.trim())) {
+        throw new RaftChannelConfigError(`sweep.targets entry ${JSON.stringify(target)} is not a channel target such as #general or #general:1a2b3c4d`)
+      }
+      return target.trim()
+    })
+  }
+
   const first = int(backoff[0], 1000, 'bridge.restartBackoffMs[0]', 1)
   const max = int(backoff[1], 60_000, 'bridge.restartBackoffMs[1]', first)
 
@@ -197,8 +229,15 @@ export function resolveConfig(raw: unknown, env: Record<string, string | undefin
       maxTurns: int(rotate.maxTurns, 300, 'rotate.maxTurns', 1),
       maxHistoryChars: int(rotate.maxHistoryChars, 1_500_000, 'rotate.maxHistoryChars', 1),
     },
+    sweep: {
+      enabled: bool(sweep.enabled, true, 'sweep.enabled'),
+      intervalMs: int(sweep.intervalMs, 60_000, 'sweep.intervalMs', 15_000, 86_400_000),
+      lookbackMs: int(sweep.lookbackMs, 15 * 60_000, 'sweep.lookbackMs', 0, 7 * 86_400_000),
+      targets,
+    },
     stateFile: join(dshHome, 'raft-channel', `${profile}.json`),
     exportProfile: envProfile === undefined,
+    mentionsFile: join(dshHome, 'raft-channel', `${profile}-mentions.json`),
   }
 }
 
