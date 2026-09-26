@@ -17,6 +17,14 @@
     "lib/**/*",
     "cordis.patch.yml"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TT-Wang/dsh-raft-channel.git"
+  },
+  "homepage": "https://github.com/TT-Wang/dsh-raft-channel#readme",
+  "bugs": {
+    "url": "https://github.com/TT-Wang/dsh-raft-channel/issues"
+  },
   "scripts": {
     "build": "node scripts/clean-build.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",

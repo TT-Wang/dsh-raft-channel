@@ -3,7 +3,8 @@ allowBuilds:
   fs-ext: true
   koffi: true
 minimumReleaseAge: 1440
-# Same exemption list as dsh-slice-agent-loop (pinned DSH 0.1.7-rc.2); change it with every DSH bump.
+# dsh-slice-agent-loop's exemption list (pinned DSH 0.1.7-rc.2) plus our extra devDeps
+# dsh-agent-default-model and dsh-agent-preset-registry; change it with every DSH bump.
 minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent-default-model@0.1.7-rc.2'
   - '@deepseek-ai/dsh-agent-loop@0.1.7-rc.2'

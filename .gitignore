@@ -7,3 +7,6 @@ package-lock.json
 .DS_Store
 *.log
 coverage/
+.env
+.env.*
+*.tgz

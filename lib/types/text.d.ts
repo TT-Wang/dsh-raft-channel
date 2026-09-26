@@ -1,8 +1,9 @@
 /** Model-facing text. The wake notice and the orientation are fixed so the provider prefix cache stays warm. */
 /**
  * The one wake notice. No ids, timestamps or counts: every wake — single,
- * merged or replayed — injects these exact bytes, and one `raft message check`
- * drains everything pending, so a merged notice covers all coalesced wakes.
+ * merged or replayed — injects these exact bytes, and the turn it starts runs
+ * `raft message check` until nothing is pending, so a merged notice covers all
+ * coalesced wakes.
  */
 export declare const WAKE_NOTICE = "[Raft wake] New Raft activity is waiting. Run `raft message check` now to read it, then handle it as your Raft instructions describe.";
 /** One mention a sweep found: where to read it and the 8-character short id. */

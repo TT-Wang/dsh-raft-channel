@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 Runs a DeepSeek Harness (DSH) agent as a Raft **external agent** that can stay up for days. [Raft](https://raft.build) is a shared workspace for humans and agents. The plugin keeps one persistent agent session for the Raft profile, supervises `raft agent bridge`, and wakes the agent whenever Raft has something for it. The agent then reads and replies with the ordinary `raft` CLI through its shell tool.
 
-Division of labor (the raft-channel wake-endpoint contract v1):
+Division of labor (the raft-channel [wake-endpoint contract v1](https://github.com/botiverse/raft-external-agents/blob/main/docs/wake-endpoint-contract.md)):
 
 | Who | Owns |
 |---|---|
@@ -16,9 +16,9 @@ Message bodies never cross the wake transport, and the plugin never reads the Ra
 
 ## Requirements
 
-- DSH host `0.1.7-rc.1` or `0.1.7-rc.2` (session format V4), Node `^22.19.0 || >=24`.
-- Raft CLI `@botiverse/raft` **0.0.26 or later**, already logged in for the agent: `raft agent login --server <url> --agent <agent-id> --profile-slug <slug>`.
-- The agent id from the Raft setup card. From CLI 0.0.26 on, the bridge refuses to start without an *independently expected* agent id (`BRIDGE_EXPECTED_AGENT_REQUIRED`). The plugin requires it too, and never guesses it from the credential file.
+- DSH host `0.1.7-rc.1` or `0.1.7-rc.2` (session format V4), Node `^22.19.0 || >=24`. Tested on the published `0.1.7-rc.2`; the peer range also admits rc.1.
+- Raft CLI `@botiverse/raft` **0.0.26 or later** (`npm i -g @botiverse/raft`), already logged in for the agent: `raft agent login --server <url> --agent <agent-id> --profile-slug <slug>`. The mention sweep parses the text output of CLI 0.0.26.
+- The agent id from the agent's External setup card in Raft. From CLI 0.0.26 on, the bridge refuses to start without an *independently expected* agent id (`BRIDGE_EXPECTED_AGENT_REQUIRED`). The plugin requires it too, and never guesses it from the credential file.
 
 ## Install
 
@@ -32,7 +32,7 @@ dsh plugin --profile <name> add /path/to/dsh-raft-channel
 
 ### Composing with dsh-slice-agent-loop
 
-A days-long session needs the slice context policy, so mount both. The profile's `package.json`:
+A days-long session needs a context policy such as [dsh-slice-agent-loop](https://github.com/TT-Wang/dsh-slice-agent-loop) (`dsh plugin --profile <name> add github:TT-Wang/dsh-slice-agent-loop`), so mount both. The profile's `package.json`:
 
 ```json
 {
@@ -48,7 +48,7 @@ A days-long session needs the slice context policy, so mount both. The profile's
 }
 ```
 
-The wake notice is a text-only user message with source kind `user`. That is deliberate: the slice policy seals only text-only `user` messages, so every notice folds into the tape like any other prompt. A notice of any other kind would stay raw in every later request. Also add `@deepseek-ai/dsh-web-app` if you want to watch the session (`raft-<profile>-<n>`) in the browser.
+The wake notice is a text-only user message with source kind `user`, like a prompt typed into the session. The slice policy keeps user messages of source kind `user` in their original role, position and bytes, so notices stay in the history verbatim. Each notice is short (the wake notice is 133 characters) and is never rewritten, so it does not disturb the provider prefix cache, and rotation (`rotate.maxTurns`, `rotate.maxHistoryChars`) bounds how many accumulate in one session. Also add `@deepseek-ai/dsh-web-app` if you want to watch the session (`raft-<profile>-<n>`) in the browser.
 
 ### Web-app compositions need a preset with a shell tool
 
@@ -61,14 +61,20 @@ After every create or resume the plugin logs the tool names the agent can see, a
 ## Launch
 
 ```sh
-export RAFT_PROFILE=slicey-dsh
-export RAFT_EXPECTED_AGENT_ID=00000000-0000-4000-8000-000000000001   # from the Raft setup card
+export RAFT_PROFILE=<profile-slug>          # the --profile-slug you logged in with
+export RAFT_EXPECTED_AGENT_ID=<agent-id>    # from the agent's External setup card in Raft
 dsh --profile <name>
 ```
 
 The agent's `raft` calls inherit `RAFT_PROFILE` from the host process. If you set `profile` only in config, the plugin exports it to the host process. A config profile that differs from `RAFT_PROFILE` is a startup error, because it would make the agent act as another identity. `RAFT_PROFILE` and `SLOCK_PROFILE` set to different values is also an error, as it is in the CLI.
 
-Approvals: under the stock `ask` policy, an approval with no answerer fails closed. Make sure the agent's shell can run `raft` without asking. The CLI only needs network access and writes nothing under the sandbox. Alternatively, mount an answerer such as the web app.
+Approvals: under the stock `ask` policy, an approval with no answerer fails closed. Make sure the agent's shell can run `raft` without asking, and keep that allowance to `raft` rather than turning approvals off. The CLI needs network access and write access to its message-state directory: CLI 0.0.26 keeps the read watermark and held drafts under the OS temp directory (override with `SLOCK_CLI_CONSUMED_SEQ_STATE_DIR` / `SLOCK_CLI_DRAFT_STATE_DIR`). Every reply depends on that watermark, because Raft holds a send from an agent that has not read up to the latest message. Alternatively, mount an answerer such as the web app.
+
+## Security
+
+- **Anyone who can message the agent can direct it.** DMs, every channel the agent can see, threads and #all (which every member of the server can post in) all reach a shell-capable agent on this host, and the orientation tells it to do what each message asks. Mount it only on a server whose members you trust with that, and rely on the DSH sandbox and approval policy for everything except `raft`.
+- **Activity leaves the host.** With `activity.enabled: true` (the default), every tool call's raw arguments and output are forwarded to the Raft server, redacted by pattern (best effort) and capped at 4096 characters. Set `activity.enabled: false` if tool I/O must stay local.
+- **Credentials.** The plugin never reads the Raft credential; the agent's `raft` calls use the CLI's own login. The wake endpoint binds to loopback by default and requires a token minted per process, passed to the bridge child only in its environment and never on argv. The mention sweep reads search previews in process only and never forwards them.
 
 ## Configuration
 
@@ -79,22 +85,22 @@ Every key is optional. An unknown key fails at load and the error lists the vali
 | `profile` | `RAFT_PROFILE` (or legacy `SLOCK_PROFILE`) | Raft profile slug |
 | `expectedAgentId` | `RAFT_EXPECTED_AGENT_ID` | Required while the bridge is enabled; passed as `--expected-agent` |
 | `raftBin` | `raft` | CLI executable |
-| `sessionPrefix` | `raft-<profile>` | Sessions are `<prefix>-<n>` |
-| `cwd` | `<DSH_HOME>/raft-workspaces/<profile>` | Agent workspace (created) |
+| `sessionPrefix` | `raft-<profile>` | Sessions are `<prefix>-<n>`; a new prefix starts a new series |
+| `cwd` | `<DSH_HOME>/raft-workspaces/<profile>` | Agent workspace (created); must be absolute |
 | `host` / `port` | `127.0.0.1` / `0` | Endpoint bind (loopback strongly recommended) |
-| `debounceMs` | `1000` | Leading-edge wake window; `0` disables it |
+| `debounceMs` | `1000` | Leading-edge wake window, at most `60000`; `0` disables it |
 | `agentPreset` | registry default | Agent preset new sessions (and resumed sessions that recorded none) join when the preset registry is composed; ignored without it. Must include a shell tool |
 | `bridge.enabled` | `true` | Spawn and supervise the bridge |
 | `bridge.pollIntervalMs` | CLI default | `--poll-interval-ms` |
 | `bridge.restartBackoffMs` | `[1000, 60000]` | First and maximum restart delay |
 | `activity.enabled` | `true` | Report activity through the drain |
-| `activity.queueCap` | `500` | Bounded queue; oldest dropped and counted |
+| `activity.queueCap` | `500` | Bounded queue (at most `100000`); oldest dropped and counted |
 | `rotate.maxTurns` | `300` | Rotate once a turn ends with this many turns |
 | `rotate.maxHistoryChars` | `1500000` | …or with this many chars of serialized model-visible history |
 | `sweep.enabled` | `true` | Run the mention sweep (independent of `bridge.enabled`; only `false` here turns it off) |
-| `sweep.intervalMs` | `60000` | Time between sweeps, at least `15000` |
-| `sweep.lookbackMs` | `900000` | Only mentions newer than plugin start minus this are considered |
-| `sweep.targets` | every visible channel | Channel targets to search instead (`#name` or `#name:<thread>`) |
+| `sweep.intervalMs` | `60000` | Time between sweeps, from `15000` to one day |
+| `sweep.lookbackMs` | `900000` | Only mentions newer than plugin start minus this are considered; at most 7 days |
+| `sweep.targets` | every visible channel | Up to 50 channel targets to search instead (`#name` or `#name:<thread>`) |
 
 Example row override in the profile's `cordis.patch.yml`. The override replaces the row's config as a whole:
 
@@ -113,9 +119,9 @@ Example row override in the profile's `cordis.patch.yml`. The override replaces 
 [Raft wake] New Raft activity is waiting. Run `raft message check` now to read it, then handle it as your Raft instructions describe.
 ```
 
-**Wake answers.** `POST /wake` requires `x-raft-bridge-token`. The token is minted per process and passed only to the bridge child, in `RAFT_CHANNEL_TOKEN`. The endpoint accepts `schema: raft-channel-wake.v1` and tolerates a missing schema. It answers `400 protocol_mismatch` to content-shaped fields (`text`, `content`, `message(s)`, `body`, `preview`, `snippet`, …) and to structured values. It answers `2xx {ok:true, runtimeSession}` only once the notice has been accepted into the agent inbox, whether still queued or already claimed by a turn. Failures use the contract's classes: `auth_revoked` (401), `protocol_mismatch` (400/405), `no_session` (503 with `retryAfterMs` while no session is attached), `injection_failed` (500).
+**Wake answers.** `POST /wake` requires `x-raft-bridge-token`. The token is minted per process and passed only to the bridge child, in `RAFT_CHANNEL_TOKEN`. The endpoint accepts `schema: raft-channel-wake.v1` and tolerates a missing schema. It answers `400 protocol_mismatch` to content-shaped fields (`text`, `content`, `message(s)`, `body`, `preview`, `snippet`, …) and to structured values. It answers `2xx {ok:true, runtimeSession}` only once the notice has been accepted into the agent inbox, whether still queued or already claimed by a turn. Failures use the contract's classes: `auth_revoked` (401), `protocol_mismatch` (400/405), `no_session` (503 with `retryAfterMs` while no session is attached), `injection_failed` (500). A body over 16 KiB is refused by closing the connection without a response; unknown paths get 404.
 
-**Coalescing.** One `raft message check` drains everything pending for the agent, so a wake is acknowledged without a new notice when a check it can rely on is still ahead:
+**Coalescing.** The check loop of a notice-started turn drains what a new wake announces, so a wake is acknowledged without a new notice when a check it can rely on is still ahead:
 
 - an earlier notice is still unclaimed in the inbox; or
 - a turn that one of our notices started is running and has not yet started a `raft message check` tool call. The bridge's reconciliation re-POSTs a wake while its message is still pending server-side, which is exactly the few seconds between the notice starting a turn and the check draining the delivery; before this rule each such re-POST became a wasted turn that found "No new inbox messages".
@@ -131,11 +137,11 @@ When no check covers a wake, the first one is injected at once. Wakes that follo
 **Persistent session and rotation.** After the loader settles, the plugin resumes the session named in `<DSH_HOME>/raft-channel/<profile>.json`, or creates `<prefix>-1`. The file is written atomically (temp file plus rename):
 
 ```json
-{ "schema": "dsh-raft-channel-state.v1", "profile": "slicey-dsh", "sessionPrefix": "raft-slicey-dsh",
-  "index": 2, "sessionId": "raft-slicey-dsh-2", "previousSessionId": "raft-slicey-dsh-1", "updatedAt": "…" }
+{ "schema": "dsh-raft-channel-state.v1", "profile": "my-agent", "sessionPrefix": "raft-my-agent",
+  "index": 2, "sessionId": "raft-my-agent-2", "previousSessionId": "raft-my-agent-1", "updatedAt": "…" }
 ```
 
-When a turn ends with `turns ≥ rotate.maxTurns` or serialized history `≥ rotate.maxHistoryChars`, the plugin creates `<prefix>-<n+1>`, updates the state file and routes later wakes there. A notice still unclaimed in the old inbox moves to the new session. A notice that was already claimed finishes in the old session, so no wake is lost. The old session is disposed once idle and stays resumable. The model is told that earlier conversation lives in Raft. Other resume failures behave as follows. A session that was never written is recreated under the same id. A corrupt or unreadable session is skipped for `n+1`. A session owned by another live writer stops startup.
+When a turn ends with `turns ≥ rotate.maxTurns` or serialized history `≥ rotate.maxHistoryChars`, the plugin creates `<prefix>-<n+1>`, updates the state file and routes later wakes there. A notice still unclaimed in the old inbox moves to the new session. A notice that was already claimed finishes in the old session, so no wake is lost. The old session is disposed once idle and stays resumable. A rotated session starts empty; the read-before-reply rule and `raft message search` recover context from Raft. Resuming needs a session persistence service in the composition; without one the session lives in memory only. Other resume failures behave as follows. A session that was never written is recreated under the same id. A corrupt or unreadable session is skipped for `n+1`. A session owned by another live writer stops startup.
 
 **Bridge supervision.** The plugin spawns:
 
@@ -163,7 +169,7 @@ The child's environment adds `RAFT_PROFILE` and `SLOCK_PROFILE` (same value), `R
 
 ## Channel mentions and Raft server delivery
 
-An @mention of the agent in a channel can fail to reach it through `raft message check`, and sometimes through the wake hint as well. Two server-side defects cause this. Line numbers refer to the Raft server source the analysis used (`packages/server/src`):
+An @mention of the agent in a channel can fail to reach it through `raft message check`, and sometimes through the wake hint as well. Two server-side defects cause this; they are reported upstream in [botiverse/raft-external-agents#20](https://github.com/botiverse/raft-external-agents/issues/20). Once they are fixed, `sweep.enabled: false` turns the workaround off. Line numbers refer to the public [botiverse/raft-source](https://github.com/botiverse/raft-source) release `v1.13.0-source.1` (`packages/server/src`):
 
 1. **The inbox is per-process memory.** An external agent's inbox is an in-memory buffer on one server process (`services/agentOrchestrator.ts:2028`, `agentInboxes = new Map<string, AgentInbox>()`). `/internal/agent-api` requests have no replica affinity, so `/wake-hints` and `/events` (what `raft message check` reads) can hit different replicas and disagree. A message already acknowledged on one replica can also be re-delivered from another replica's buffer.
 2. **#all is a virtual channel, but the durable paths join a real table.** The audience of #all is every agent on the server (`services/channelService.ts:3249-3255`, `getChannelAgents` → `getServerAudienceAgents`). The durable inbox rebuild (`services/messageService.ts:4304-4357`) and the ack-cursor advance (`markAgentLegacyAckCheckpoint`, `services/channelService.ts:15274-15297`) both join the `channel_agents` table, and a new agent has no #all row there. A top-level @mention in #all therefore lives only in the memory of the replica that accepted the send. On the live deployment one such mention was never delivered and another arrived only after 6.5 minutes.
@@ -202,7 +208,7 @@ The seen-set (the last 2000 ids), the checked short ids, the watermark (the newe
 
 ## Status
 
-`ctx.raftChannel.status()` returns `{state, profile, endpoint, runtimeSession, turns, bridge, activityQueued, mentionSweep, error}`, and `ctx.raftChannel.whenReady()` resolves once startup completes.
+`ctx.raftChannel.status()` returns `{state, profile, endpoint, runtimeSession, turns, bridge, activityQueued, mentionSweep, error}`. `ctx.raftChannel.whenReady()` resolves once startup finishes, whether it succeeded or failed (it never rejects); check `status().state` and `status().error` afterwards.
 
 ## Development
 
