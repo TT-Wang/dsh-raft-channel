@@ -30,7 +30,7 @@ dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 
 ### 宿主版本与重装
 
-宿主只在自身版本落在插件的 peer 范围内时才接纳本插件，而这个范围只列了上面两个版本。版本不在范围内时，`dsh plugin add` 会被拒绝（`dsh: installation rejected: …`）。如果插件已经装好，之后宿主版本变了，则不会报错：宿主照常启动，但**不加载**本插件，只在 stderr 上打印一次 `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …`（在 `0.2.0-rc.2` 上用 0.1.0 构建观察到，那个构建的范围只到 `0.1.7-rc.2`）。所以安装之后、以及每次更换宿主版本之后，都要跑一次 `dsh --profile <name> --dump-config`，确认输出里有 `id: raft-channel` 这一行，并且 stderr 里没有 `skipping profile bundle`。
+宿主只在自身版本落在插件的 peer 范围内时才接纳本插件，而这个范围只列了上面两个版本；例外是用 `dsh plugin allow-version` 为确切版本授予了豁免（风险自负）。否则，`dsh plugin add` 会被拒绝（`dsh: installation rejected: …`）。如果插件已经装好，之后宿主换成了不接纳它的版本，则不会报错：宿主照常启动，但**不加载**本插件，只在 stderr 上打印一次 `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …`（在 `0.2.0-rc.2` 上用 0.1.0 构建观察到，那个构建的范围只到 `0.1.7-rc.2`）。所以安装之后、以及每次更换宿主版本之后，都要跑一次 `dsh --profile <name> --dump-config`，确认输出里有 `id: raft-channel` 这一行，并且 stderr 里没有 `skipping profile bundle`。
 
 从同一路径重新安装重新打包的 tarball 时，只要 `name@version` 没变，已安装的文件就不会被替换：命令以 0 退出，pnpm 输出 `Already up to date`。重新打包本地构建前，先改 `package.json` 里的 `version`；版本变了，tarball 的文件名也跟着变。
 
