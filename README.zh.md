@@ -8,7 +8,7 @@
 
 ## 前提
 
-- DSH `0.1.7-rc.1` 或 `0.1.7-rc.2`，Node `^22.19.0 || >=24`。实测版本是已发布的 `0.1.7-rc.2`，peer 范围同时允许 rc.1。
+- DSH `0.1.7-rc.2` 或 `0.2.0-rc.2`（两者的会话格式都是 V4），Node `^22.19.0 || >=24`。CI 在这两个已发布版本上都跑类型检查和全部测试。其他版本不在 peer 范围内，宿主此时的行为见[宿主版本与重装](#宿主版本与重装)。
 - `@botiverse/raft` 0.0.26 或更高（`npm i -g @botiverse/raft`），并已为该 agent 执行过 `raft agent login`。提及扫描按 CLI 0.0.26 的文本输出解析。
 - Raft 里该 agent 的 External setup 卡片上的 Agent id。CLI 0.0.26 起，bridge 缺少独立声明的预期 Agent id 就拒绝启动。插件在启动时同样要求提供这个 id，并且不会去凭据文件里猜。
 
@@ -27,6 +27,12 @@ dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 唤醒提示是一条纯文本的 user 消息，source kind 为 `user`，和在会话里手打的提示一样。slice 策略会把 source kind 为 `user` 的 user 消息按原来的角色、位置和字节保留下来，所以提示会原样留在历史里。唤醒提示只有 133 个字符，发出后不会被改写，所以不会破坏前缀缓存；一个会话里能攒多少条，由轮换阈值（`rotate.maxTurns`、`rotate.maxHistoryChars`）封顶。
 
 组合了 `@deepseek-ai/dsh-web-app` 时要注意：web-app 会挂载 agent 预设注册表（`ctx.agentPresets`），bash、read、write 等模型可见工具都放在预设里，agent 必须加入某个预设才能拿到；不加入的话只看得到全局注册的工具（比如 slice 的 recall 工具），连 `raft message check` 都跑不了。本插件创建会话时会加入 `agentPreset`（默认取注册表当前默认预设），并把它写进会话头；恢复时加入会话记录的预设，没有记录的（例如本功能上线前创建的会话）加入配置或默认预设。预设不存在或不可用时启动直接失败，并带上注册表的原始错误。所用预设必须包含 shell 工具（`bash` 或 `pwsh`）。每次创建或恢复后，插件会把 agent 能看到的工具名写进日志，没有 shell 工具时记一条 error。没有预设注册表的组合（如只有 `dsh-base`）行为不变。
+
+### 宿主版本与重装
+
+宿主只在自身版本落在插件的 peer 范围内时才接纳本插件，而这个范围只列了上面两个版本。版本不在范围内时，`dsh plugin add` 会被拒绝（`dsh: installation rejected: …`）。如果插件已经装好，之后宿主版本变了，则不会报错：宿主照常启动，但**不加载**本插件，只在 stderr 上打印一次 `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …`（在 `0.2.0-rc.2` 上用 0.1.0 构建观察到，那个构建的范围只到 `0.1.7-rc.2`）。所以安装之后、以及每次更换宿主版本之后，都要跑一次 `dsh --profile <name> --dump-config`，确认输出里有 `id: raft-channel` 这一行，并且 stderr 里没有 `skipping profile bundle`。
+
+从同一路径重新安装重新打包的 tarball 时，只要 `name@version` 没变，已安装的文件就不会被替换：命令以 0 退出，pnpm 输出 `Already up to date`。重新打包本地构建前，先改 `package.json` 里的 `version`；版本变了，tarball 的文件名也跟着变。
 
 ## 启动
 

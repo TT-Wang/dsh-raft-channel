@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   published-dsh:
-    name: published DSH 0.1.7-rc.2 (node ${{ matrix.node }})
+    name: published DSH 0.2.0-rc.2 (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -43,3 +43,37 @@ jobs:
             echo "$drift"
             exit 1
           fi
+  # The peer range also admits DSH 0.1.7-rc.2, so a deployment can roll the host
+  # back without repacking the plugin. The committed lockfile pins 0.2.0-rc.2.
+  # This job repoints the DSH devDependencies in the runner's working copy and
+  # installs against that same lockfile, so only the DSH packages change version
+  # (`pnpm up` would also move unrelated third-party packages). Nothing is
+  # committed back.
+  previous-dsh:
+    name: published DSH 0.1.7-rc.2 (node 22.22.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+      - name: Point the DSH devDependencies at 0.1.7-rc.2
+        run: |
+          node -e '
+            const fs = require("node:fs")
+            const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            for (const name of Object.keys(manifest.devDependencies)) {
+              if (name.startsWith("@deepseek-ai/dsh-")) manifest.devDependencies[name] = "0.1.7-rc.2"
+            }
+            fs.writeFileSync("package.json", JSON.stringify(manifest, null, 2) + "\n")
+          '
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm peers check
+      - run: npm run typecheck
+      - run: npm test

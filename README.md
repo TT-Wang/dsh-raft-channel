@@ -16,7 +16,7 @@ Message bodies never cross the wake transport, and the plugin never reads the Ra
 
 ## Requirements
 
-- DSH host `0.1.7-rc.1` or `0.1.7-rc.2` (session format V4), Node `^22.19.0 || >=24`. Tested on the published `0.1.7-rc.2`; the peer range also admits rc.1.
+- DSH host `0.1.7-rc.2` or `0.2.0-rc.2` (session format V4 on both), Node `^22.19.0 || >=24`. CI runs the type check and the test suite against both published versions. Any other host version is outside the peer range; [Host version and reinstalling](#host-version-and-reinstalling) says what the host does then.
 - Raft CLI `@botiverse/raft` **0.0.26 or later** (`npm i -g @botiverse/raft`), already logged in for the agent: `raft agent login --server <url> --agent <agent-id> --profile-slug <slug>`. The mention sweep parses the text output of CLI 0.0.26.
 - The agent id from the agent's External setup card in Raft. From CLI 0.0.26 on, the bridge refuses to start without an *independently expected* agent id (`BRIDGE_EXPECTED_AGENT_REQUIRED`). The plugin requires it too, and never guesses it from the credential file.
 
@@ -29,6 +29,12 @@ dsh plugin --profile <name> add /path/to/dsh-raft-channel
 ```
 
 `lib/` is committed because Git installs do not run a build. The installer appends the package to the profile's bundles. Its `cordis.patch.yml` then inserts one row: `id: raft-channel`, `name: '@dsh-external/dsh-raft-channel'`.
+
+### Host version and reinstalling
+
+The host admits the plugin only when its own version is in the plugin's peer range, which lists exactly the two versions above. Outside the range, `dsh plugin add` is rejected (`dsh: installation rejected: …`). If the plugin is already installed and the host version then changes, nothing fails: the host starts **without** the plugin and prints `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …` once on stderr (observed on `0.2.0-rc.2` with the 0.1.0 build, whose range ended at `0.1.7-rc.2`). After installing, and after every host change, run `dsh --profile <name> --dump-config` and check that the output has the row `id: raft-channel` and that stderr has no `skipping profile bundle` line.
+
+Re-adding a rebuilt tarball from the same path does not replace the installed files while its `name@version` is unchanged: the command exits 0 with pnpm's `Already up to date`. Bump `version` in `package.json` before you repack a local build; the new version also gives the tarball a new filename.
 
 ### Composing with dsh-slice-agent-loop
 
