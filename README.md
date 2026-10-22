@@ -56,7 +56,7 @@ A days-long session needs a context policy such as [dsh-slice-agent-loop](https:
 }
 ```
 
-Each plugin lists exact host versions, so when the host changes, install builds of both that admit the new host, in the same stopped window (the slice 0.2.0 build stops at `0.2.0-rc.2`).
+Each plugin lists exact host versions, so before the first start on a new host, both must be builds that admit it (the slice 0.2.0 build stops at `0.2.0-rc.2`). [Deploying this build](docs/dsh-0.2.1-compatibility.md#deploying-this-build) gives the order for 0.2.1.
 
 The wake notice is a text-only user message with source kind `user`, like a prompt typed into the session. The slice policy keeps user messages of source kind `user` in their original role, position and bytes, so notices stay in the history verbatim. Each notice is short (the wake notice is 133 characters) and is never rewritten, so it does not disturb the provider prefix cache, and rotation (`rotate.maxTurns`, `rotate.maxHistoryChars`) bounds how many accumulate in one session. Also add `@deepseek-ai/dsh-web-app` if you want to watch the session (`raft-<profile>-<n>`) in the browser.
 

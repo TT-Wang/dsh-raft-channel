@@ -18,11 +18,13 @@
 dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 ```
 
-安装后，profile 的 bundles 会追加本包，`cordis.patch.yml` 会插入一行 `id: raft-channel`。两个插件都只列确切的宿主版本，所以换宿主时要在同一个停机窗口里把两者都换成接纳新宿主的构建（slice 0.2.0 构建只到 `0.2.0-rc.2`）。长期运行建议同时挂载上下文策略插件 [dsh-slice-agent-loop](https://github.com/TT-Wang/dsh-slice-agent-loop)（`dsh plugin --profile <name> add github:TT-Wang/dsh-slice-agent-loop`），写法如下：
+安装后，profile 的 bundles 会追加本包，`cordis.patch.yml` 会插入一行 `id: raft-channel`。长期运行建议同时挂载上下文策略插件 [dsh-slice-agent-loop](https://github.com/TT-Wang/dsh-slice-agent-loop)（`dsh plugin --profile <name> add github:TT-Wang/dsh-slice-agent-loop`），写法如下：
 
 ```json
 { "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@dsh-external/dsh-slice-agent-loop", "@dsh-external/dsh-raft-channel"] } } }
 ```
+
+两个插件都只列确切的宿主版本，所以在新宿主上第一次启动之前，两者都要换成接纳新宿主的构建（slice 0.2.0 构建只到 `0.2.0-rc.2`）。换到 0.2.1 的顺序见 [Deploying this build](docs/dsh-0.2.1-compatibility.md#deploying-this-build)（英文）。
 
 唤醒提示是一条纯文本的 user 消息，source kind 为 `user`，和在会话里手打的提示一样。slice 策略会把 source kind 为 `user` 的 user 消息按原来的角色、位置和字节保留下来，所以提示会原样留在历史里。唤醒提示只有 133 个字符，发出后不会被改写，所以不会破坏前缀缓存；一个会话里能攒多少条，由轮换阈值（`rotate.maxTurns`、`rotate.maxHistoryChars`）封顶。
 
