@@ -8,7 +8,7 @@
 
 ## 前提
 
-- DSH `0.1.7-rc.2` 或 `0.2.0-rc.2`（两者的会话格式都是 V4），Node `^22.19.0 || >=24`。CI 在这两个已发布版本上都跑类型检查和全部测试。其他版本不在 peer 范围内，宿主此时的行为见[宿主版本与重装](#宿主版本与重装)。
+- DSH `0.2.0-rc.2` 或 `0.2.1-rc.2`（两者的会话格式都是 V4），Node `^22.19.0 || >=24`。CI 在这两个已发布版本上都跑类型检查和全部测试。其他版本不在 peer 范围内，`0.1.7-rc.2` 也不在（最后一个接纳它的构建是 0.1.1）。宿主此时的行为见[宿主版本与重装](#宿主版本与重装)，0.2.1 带来的变化见 [DSH 0.2.1 compatibility](docs/dsh-0.2.1-compatibility.md)（英文）。
 - `@botiverse/raft` 0.0.26 或更高（`npm i -g @botiverse/raft`），并已为该 agent 执行过 `raft agent login`。提及扫描按 CLI 0.0.26 的文本输出解析。
 - Raft 里该 agent 的 External setup 卡片上的 Agent id。CLI 0.0.26 起，bridge 缺少独立声明的预期 Agent id 就拒绝启动。插件在启动时同样要求提供这个 id，并且不会去凭据文件里猜。
 
@@ -18,7 +18,7 @@
 dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 ```
 
-安装后，profile 的 bundles 会追加本包，`cordis.patch.yml` 会插入一行 `id: raft-channel`。长期运行建议同时挂载上下文策略插件 [dsh-slice-agent-loop](https://github.com/TT-Wang/dsh-slice-agent-loop)（`dsh plugin --profile <name> add github:TT-Wang/dsh-slice-agent-loop`），写法如下：
+安装后，profile 的 bundles 会追加本包，`cordis.patch.yml` 会插入一行 `id: raft-channel`。两个插件都只列确切的宿主版本，所以换宿主时要在同一个停机窗口里把两者都换成接纳新宿主的构建（slice 0.2.0 构建只到 `0.2.0-rc.2`）。长期运行建议同时挂载上下文策略插件 [dsh-slice-agent-loop](https://github.com/TT-Wang/dsh-slice-agent-loop)（`dsh plugin --profile <name> add github:TT-Wang/dsh-slice-agent-loop`），写法如下：
 
 ```json
 { "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@dsh-external/dsh-slice-agent-loop", "@dsh-external/dsh-raft-channel"] } } }
@@ -30,9 +30,11 @@ dsh plugin --profile <name> add github:TT-Wang/dsh-raft-channel
 
 ### 宿主版本与重装
 
-宿主只在自身版本落在插件的 peer 范围内时才接纳本插件，而这个范围只列了上面两个版本；例外是用 `dsh plugin allow-version` 为确切版本授予了豁免（风险自负）。否则，`dsh plugin add` 会被拒绝（`dsh: installation rejected: …`）。如果插件已经装好，之后宿主换成了不接纳它的版本，则不会报错：宿主照常启动，但**不加载**本插件，只在 stderr 上打印一次 `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …`（在 `0.2.0-rc.2` 上用 0.1.0 构建观察到，那个构建的范围只到 `0.1.7-rc.2`）。所以安装之后、以及每次更换宿主版本之后，都要跑一次 `dsh --profile <name> --dump-config`，确认输出里有 `id: raft-channel` 这一行，并且 stderr 里没有 `skipping profile bundle`。
+宿主只在自身版本落在插件的 peer 范围内时才接纳本插件，而这个范围只列了上面两个版本；例外是用 `dsh plugin allow-version` 为确切版本授予了豁免（风险自负）。否则，`dsh plugin add` 会被拒绝（`dsh: installation rejected: …`）。如果插件已经装好，之后宿主换成了不接纳它的版本，则不会报错：宿主照常启动，但**不加载**本插件，只在 stderr 上打印一次 `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …`（在 `0.2.1-rc.2` 上用 0.1.1 构建观察到，那个构建的范围只到 `0.2.0-rc.2`）。这一行后半段列出未满足的范围：0.2.1 宿主写作 `requirements {…}`，0.2.0 宿主写作 `peerDependencies {…}`，所以匹配时只认 `skipping profile bundle` 这个前缀。安装之后、以及每次更换宿主版本之后，都要跑一次 `dsh --profile <name> --dump-config`，确认输出里有 `id: raft-channel` 这一行，并且 stderr 里没有 `skipping profile bundle`。
 
 从同一路径重新安装重新打包的 tarball 时，只要 `name@version` 没变，已安装的文件就不会被替换：命令以 0 退出，pnpm 输出 `Already up to date`。重新打包本地构建前，先改 `package.json` 里的 `version`；版本变了，tarball 的文件名也跟着变。
+
+**从 0.2.1 回退宿主。** 插件两个宿主都接纳，但在 `0.2.1-rc.2` 上跑过 shell 命令的会话，`0.2.0-rc.2` 就打不开了：0.2.1 宿主每次 shell 调用（包括前台调用）都会写 `job/registered` 和 `job/settled` 事件，而 0.2.0 宿主拒绝读取含有它不认识的事件类型的日志。这样回退之后，插件记一条 `raft-channel: cannot resume <session> (… contains event type "job/registered" …); continuing in a new session`，改用 `<prefix>-<n+1>` 继续处理唤醒；旧会话留在磁盘上，0.2.1 宿主仍能读。想在回退后保住 agent 的历史，就在第一次用 0.2.1 启动前备份 `<DSH_HOME>/sessions` 和 `<DSH_HOME>/raft-channel/<profile>.json`，回退时一起恢复；在 0.2.1 上跑过的那些 turn 会因此丢失。反方向不需要任何处理：0.2.1 宿主能恢复 0.2.0 写的会话。
 
 ## 启动
 
@@ -52,7 +54,7 @@ dsh --profile <name>
 
 ## 配置
 
-`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`agentPreset`（默认取预设注册表当前的默认预设；仅在组合了 `ctx.agentPresets` 时生效）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`、`sweep.{enabled=true,intervalMs=60000(至少 15000),lookbackMs=900000,targets}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
+`profile`、`expectedAgentId`、`raftBin`（默认 `raft`）、`sessionPrefix`（默认 `raft-<profile>`）、`cwd`（默认 `<DSH_HOME>/raft-workspaces/<profile>`；在 DSH 0.2.1 上 agent 可以用 `working_directory` 工具切换目录，`cwd` 仍是会话的项目目录）、`host`/`port`（默认 `127.0.0.1`/`0`）、`debounceMs`（默认 1000）、`agentPreset`（默认取预设注册表当前的默认预设；仅在组合了 `ctx.agentPresets` 时生效）、`bridge.{enabled,pollIntervalMs,restartBackoffMs}`、`activity.{enabled,queueCap}`、`rotate.{maxTurns=300,maxHistoryChars=1500000}`、`sweep.{enabled=true,intervalMs=60000(至少 15000),lookbackMs=900000,targets}`。写错或不认识的键会在加载时报错，错误信息会列出所有合法键。
 
 ## 行为要点
 

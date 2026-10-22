@@ -16,7 +16,7 @@ Message bodies never cross the wake transport, and the plugin never reads the Ra
 
 ## Requirements
 
-- DSH host `0.1.7-rc.2` or `0.2.0-rc.2` (session format V4 on both), Node `^22.19.0 || >=24`. CI runs the type check and the test suite against both published versions. Any other host version is outside the peer range; [Host version and reinstalling](#host-version-and-reinstalling) says what the host does then.
+- DSH host `0.2.0-rc.2` or `0.2.1-rc.2` (session format V4 on both), Node `^22.19.0 || >=24`. CI runs the type check and the test suite against both published versions. Any other host version is outside the peer range, including `0.1.7-rc.2` (0.1.1 is the last build that admits it). [Host version and reinstalling](#host-version-and-reinstalling) says what the host does then, and [DSH 0.2.1 compatibility](docs/dsh-0.2.1-compatibility.md) what changed with 0.2.1.
 - Raft CLI `@botiverse/raft` **0.0.26 or later** (`npm i -g @botiverse/raft`), already logged in for the agent: `raft agent login --server <url> --agent <agent-id> --profile-slug <slug>`. The mention sweep parses the text output of CLI 0.0.26.
 - The agent id from the agent's External setup card in Raft. From CLI 0.0.26 on, the bridge refuses to start without an *independently expected* agent id (`BRIDGE_EXPECTED_AGENT_REQUIRED`). The plugin requires it too, and never guesses it from the credential file.
 
@@ -32,9 +32,11 @@ dsh plugin --profile <name> add /path/to/dsh-raft-channel
 
 ### Host version and reinstalling
 
-The host admits the plugin only when its own version is in the plugin's peer range, which lists exactly the two versions above, or when an exact-version exemption has been granted with `dsh plugin allow-version` (at your own risk). Otherwise `dsh plugin add` is rejected (`dsh: installation rejected: …`). If the plugin is already installed and the host then changes to a version that does not admit it, nothing fails: the host starts **without** the plugin and prints `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …` once on stderr (observed on `0.2.0-rc.2` with the 0.1.0 build, whose range ended at `0.1.7-rc.2`). After installing, and after every host change, run `dsh --profile <name> --dump-config` and check that the output has the row `id: raft-channel` and that stderr has no `skipping profile bundle` line.
+The host admits the plugin only when its own version is in the plugin's peer range, which lists exactly the two versions above, or when an exact-version exemption has been granted with `dsh plugin allow-version` (at your own risk). Otherwise `dsh plugin add` is rejected (`dsh: installation rejected: …`). If the plugin is already installed and the host then changes to a version that does not admit it, nothing fails: the host starts **without** the plugin and prints `dsh: skipping profile bundle "@dsh-external/dsh-raft-channel": …` once on stderr (observed on `0.2.1-rc.2` with the 0.1.1 build, whose range ended at `0.2.0-rc.2`). The rest of that line names the unmet ranges as `requirements {…}` on 0.2.1 hosts and as `peerDependencies {…}` on 0.2.0 hosts, so match on the `skipping profile bundle` prefix. After installing, and after every host change, run `dsh --profile <name> --dump-config` and check that the output has the row `id: raft-channel` and that stderr has no `skipping profile bundle` line.
 
 Re-adding a rebuilt tarball from the same path does not replace the installed files while its `name@version` is unchanged: the command exits 0 with pnpm's `Already up to date`. Bump `version` in `package.json` before you repack a local build; the new version also gives the tarball a new filename.
+
+**Rolling the host back from 0.2.1.** The plugin admits both hosts, but a session that ran a shell command on `0.2.1-rc.2` can no longer be opened by `0.2.0-rc.2`. The 0.2.1 host writes `job/registered` and `job/settled` events for every shell call, foreground calls included, and the 0.2.0 host refuses a log that contains event types it does not know. After such a rollback the plugin logs `raft-channel: cannot resume <session> (… contains event type "job/registered" …); continuing in a new session`, starts `<prefix>-<n+1>` and keeps serving wakes; the old session stays on disk, readable by a 0.2.1 host. To keep the agent's history across a rollback, back up `<DSH_HOME>/sessions` and `<DSH_HOME>/raft-channel/<profile>.json` before the first start on 0.2.1, and restore both when you switch back; the turns run on 0.2.1 are then lost. The other direction needs nothing: a 0.2.1 host resumes a session that 0.2.0 wrote.
 
 ### Composing with dsh-slice-agent-loop
 
@@ -53,6 +55,8 @@ A days-long session needs a context policy such as [dsh-slice-agent-loop](https:
   }
 }
 ```
+
+Each plugin lists exact host versions, so when the host changes, install builds of both that admit the new host, in the same stopped window (the slice 0.2.0 build stops at `0.2.0-rc.2`).
 
 The wake notice is a text-only user message with source kind `user`, like a prompt typed into the session. The slice policy keeps user messages of source kind `user` in their original role, position and bytes, so notices stay in the history verbatim. Each notice is short (the wake notice is 133 characters) and is never rewritten, so it does not disturb the provider prefix cache, and rotation (`rotate.maxTurns`, `rotate.maxHistoryChars`) bounds how many accumulate in one session. Also add `@deepseek-ai/dsh-web-app` if you want to watch the session (`raft-<profile>-<n>`) in the browser.
 
@@ -92,7 +96,7 @@ Every key is optional. An unknown key fails at load and the error lists the vali
 | `expectedAgentId` | `RAFT_EXPECTED_AGENT_ID` | Required while the bridge is enabled; passed as `--expected-agent` |
 | `raftBin` | `raft` | CLI executable |
 | `sessionPrefix` | `raft-<profile>` | Sessions are `<prefix>-<n>`; a new prefix starts a new series |
-| `cwd` | `<DSH_HOME>/raft-workspaces/<profile>` | Agent workspace (created); must be absolute |
+| `cwd` | `<DSH_HOME>/raft-workspaces/<profile>` | Agent workspace (created); must be absolute. On DSH 0.2.1 the agent can change directory with the `working_directory` tool; `cwd` stays the session's project directory |
 | `host` / `port` | `127.0.0.1` / `0` | Endpoint bind (loopback strongly recommended) |
 | `debounceMs` | `1000` | Leading-edge wake window, at most `60000`; `0` disables it |
 | `agentPreset` | registry default | Agent preset new sessions (and resumed sessions that recorded none) join when the preset registry is composed; ignored without it. Must include a shell tool |

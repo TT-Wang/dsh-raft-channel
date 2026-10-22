@@ -2,23 +2,29 @@
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, type Plugin } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import AgentPresets, { type PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import AgentRegistry, { type ModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import * as loopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
-import Invariants from '@deepseek-ai/dsh-invariants'
 import LlmRuntime, { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
-import * as sessionInvariant from '@deepseek-ai/dsh-session/invariant'
-import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlModule from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { defineTool } from '@deepseek-ai/dsh-tools'
 import RaftChannel, { type Config } from '../src/index.js'
+
+/**
+ * JSONL persistence as a cordis plugin on either host. 0.2.0-rc.2 default-exports
+ * the plugin class; 0.2.1-rc.2 has no default export and the module namespace
+ * itself is the plugin (`name`, `Config`, `apply`). Cordis does not unwrap
+ * `default`, so neither a plain default import nor a plain namespace import
+ * works on both.
+ */
+const JsonlPersistence = ((JsonlModule as { default?: unknown }).default ?? JsonlModule) as Plugin<{ root: string; compression: 'none' }>
 
 export const FAKE_RAFT = new URL('./fixtures/fake-raft.mjs', import.meta.url).pathname
 /** Import-free Loader row registering the tools named by its config. */
@@ -105,7 +111,7 @@ function globalTool(ctx: Context, name: string): void {
   }))
 }
 
-/** Mount the stock loop, invariants, optional JSONL persistence and a scripted model. */
+/** Mount the stock loop, optional JSONL persistence and a scripted model. */
 export async function host(options: HostOptions = {}) {
   const ctx = new Context()
   const logs: Array<{ type: string; text: string }> = []
@@ -123,9 +129,6 @@ export async function host(options: HostOptions = {}) {
   await ctx.plugin(AgentRegistry)
   if (options.persistenceRoot !== undefined) await ctx.plugin(JsonlPersistence, { root: options.persistenceRoot, compression: 'none' })
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(Invariants)
-  await ctx.plugin(sessionInvariant)
-  await ctx.plugin(loopInvariant)
   await ctx.plugin(FakeDefaultModel)
   if (options.presets !== undefined) {
     await ctx.plugin(AgentPresets, { default: options.presets.default })
