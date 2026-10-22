@@ -3,7 +3,8 @@ allowBuilds:
   fs-ext: true
   koffi: true
 minimumReleaseAge: 1440
-# Empty while every pinned release is more than a day old (DSH 0.2.0-rc.2 was
-# published 2026-09-29). Add entries only when bumping to a release published
-# less than 24 hours ago, and remove them again at the next bump.
+# Empty while every pinned release is more than a day old (DSH 0.2.1-rc.2 was
+# published 2026-10-17, the cordis packages it needs on 2026-10-16). Add entries
+# only when bumping to a release published less than 24 hours ago, and remove
+# them again at the next bump.
 minimumReleaseAgeExclude: []
