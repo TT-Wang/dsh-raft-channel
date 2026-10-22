@@ -79,7 +79,7 @@ These are host composition changes. None of them needs a plugin change. The figu
 
 ## Verification recorded on 2026-10-22
 
-Machine: macOS 26.5 arm64, Node 22.22.3, pnpm 11.7.0. Plugin: version 0.1.2 at commit `12e39ad`. This section was added in the next commit, which changes only this file. Every type check and test run below ran under `sandbox-exec` with reads of the scratch directory's ancestor `node_modules` denied, so no package could load from an older copy (see [Before the next host bump](#before-the-next-host-bump)).
+Machine: macOS 26.5 arm64, Node 22.22.3, pnpm 11.7.0. Plugin: version 0.1.2 at commit `3ef2f29`. Its source, `lib/`, lockfile, tests and CI are those of `12e39ad`; the commits in between change only the READMEs and this file. This section was last updated in the next commit, which changes only this file. Every type check and test run below ran under `sandbox-exec` with reads of the scratch directory's ancestor `node_modules` denied, so no package could load from an older copy (see [Before the next host bump](#before-the-next-host-bump)).
 
 | Check | Host | Result |
 | --- | --- | --- |
@@ -87,11 +87,11 @@ Machine: macOS 26.5 arm64, Node 22.22.3, pnpm 11.7.0. Plugin: version 0.1.2 at c
 | CI job `previous-dsh`, replayed from a fresh clone: DSH devDependencies repointed, `pnpm install --no-frozen-lockfile`, `pnpm peers check`, `typecheck`, tests | published 0.2.0-rc.2 packages, cordis 4.0.5 | all passed; **126 passed, 2 skipped across 11 files**; a rebuild there also reproduced the committed `lib/` |
 | Same test suite on Node 25.6.0 (not a CI node) | published 0.2.1-rc.2 packages | 126 passed, 2 skipped |
 | Pins moved, test harness unchanged | published 0.2.1-rc.2 packages | TS2307 for the three invariant imports and TS1192 for the JSONL default import; 8 of 11 spec files failed to load, 16 tests ran |
-| `npm pack` | n/a | `dsh-external-dsh-raft-channel-0.1.2.tgz`, 25 files, 65.5 kB packed, 209.1 kB unpacked, SHA-256 `023765184b9f1fa6ae3a0973f0f46be61385176b73908bcdaea50b56665896cf` |
+| `npm pack` | n/a | `dsh-external-dsh-raft-channel-0.1.2.tgz`, 25 files, 65.6 kB packed, 209.3 kB unpacked, SHA-256 `03192bba032cfc761a8dd13df7055102bfc687c7fbd1ddd6a3e576f13bc1dc0c`; a fresh clone at `3ef2f29` packs to the same digest |
 
-The digest identifies this build only. A change to `lib/`, `package.json`, a README or `LICENSE` changes it; this file is not in the tarball.
+The digest identifies this build only. A change to `lib/`, `package.json`, a README or `LICENSE` changes it; this file is not in the tarball. The pack of `12e39ad` (`023765…`) differs from this one only in `README.md` and `README.zh.md`.
 
-Admission was checked with `dsh plugin --profile raft-admit add <tarball>` followed by `dsh --profile raft-admit --dump-config`, in a new scratch `DSH_HOME` per run. The profile mirrored the live one: bundles `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app`, `nodeLinker: hoisted`, `autoInstallPeers: false`, an empty `cordis.patch.yml`. The profile was never started. The 0.2.1-rc.2 CLI came from `npm install @deepseek-ai/dsh@0.2.1-rc.2` in a scratch directory. The 0.2.0-rc.2 CLI was the live deployment's own host binary, run with the scratch `DSH_HOME`; no file under that host directory changed.
+Admission was checked with `dsh plugin --profile raft-admit add <tarball>` followed by `dsh --profile raft-admit --dump-config`, in a new scratch `DSH_HOME` per run. The profile mirrored the live one: bundles `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app`, `nodeLinker: hoisted`, `autoInstallPeers: false`, an empty `cordis.patch.yml`. The profile was never started. The 0.2.1-rc.2 CLI came from `npm install @deepseek-ai/dsh@0.2.1-rc.2` in a scratch directory. The 0.2.0-rc.2 CLI came from a pnpm install of `@deepseek-ai/dsh@0.2.0-rc.2` from npm in a scratch directory; its `lib/bin.js` is byte-identical to the live host's. No file of the live deployment was touched.
 
 | Build | Host CLI | `plugin add` | `--dump-config` |
 | --- | --- | --- | --- |
@@ -103,11 +103,26 @@ Admission was checked with `dsh plugin --profile raft-admit add <tarball>` follo
 
 For each dump the live launcher's checks (described under [Deploying this build](#deploying-this-build)) were applied to the raft-channel row. Both 0.1.2 runs and the upgraded profile pass. The 0.1.1 profile started on 0.2.1 fails on the `skipping profile bundle` line, which is the path where the launcher exits 78.
 
+### Cutover orders
+
+The orders under [Deploying this build](#deploying-this-build) were checked the same way, in a scratch profile named `slicey-dsh` with copies of the live profile's `pnpm-workspace.yaml`, `cordis.yml` and `cordis.patch.yml`. Each order started from the live state: slice 0.2.0 and raft-channel 0.1.1, both added with the 0.2.0-rc.2 CLI. The slice build was 0.3.0, packed from that repository's `feat/dsh-0.2.1` branch at `c826dfd` (SHA-256 `62b0eb7efc3d0d7011422da0388b5e5c0b78da48413e4c70f1ed15d43c32c322`), which is not released yet. Each dump also went through a copy of the deployment launcher that differs only in `DSH_HOME`, the host path and the final `exec`, and checks both rows.
+
+| Order | Step | `plugin add` | `--dump-config` and launcher checks |
+| --- | --- | --- | --- |
+| A: 0.1.2 ahead of the window | add 0.1.2 with 0.2.0-rc.2 | exit 0, no warning | 0.2.0-rc.2: both rows, empty stderr, launcher passes (185 top-level rows). 0.2.1-rc.2: slice skipped, launcher exits 78 |
+| | then add slice 0.3.0 with 0.2.1-rc.2 | exit 0, no warning | 0.2.1-rc.2: both rows, empty stderr, launcher passes (192 rows). 0.2.0-rc.2: the same (185 rows) |
+| B: one window, raft-channel first | add 0.1.2 with 0.2.1-rc.2 | exit 0, one `dsh: warning: Plugin @dsh-external/dsh-slice-agent-loop@0.2.0 is incompatible with dsh 0.2.1-rc.2: requirements {…}` | 0.2.1-rc.2: slice skipped, launcher exits 78 |
+| | then add slice 0.3.0 with 0.2.1-rc.2 | exit 0, no warning | both hosts: both rows, empty stderr, launcher passes |
+| C: one window, slice first | add slice 0.3.0 with 0.2.1-rc.2 | exit 0, one `dsh: warning: Plugin @dsh-external/dsh-raft-channel@0.1.1 is incompatible with dsh 0.2.1-rc.2: requirements {…}` | 0.2.1-rc.2: raft-channel skipped, launcher exits 78 |
+| | then add 0.1.2 with 0.2.1-rc.2 | exit 0, no warning | both hosts: both rows, empty stderr, launcher passes |
+
+Each warning was followed by `dsh: it stays installed but profile startup denies it until you grant an exemption for those exact versions.`
+
 No release-age exemption was needed. `minimumReleaseAgeExclude` is empty, and every install above ran with `minimumReleaseAge: 1440`.
 
 The figures in [What the agent sees on 0.2.1](#what-the-agent-sees-on-021) and [Session data across hosts](#session-data-across-hosts) come from the investigation smoke runs on the same day. They used the same source and lib, with the peer list `0.1.7-rc.2 || 0.2.0-rc.2 || 0.2.1-rc.2` under version 0.1.2. They were not repeated for this record, because they start the profile.
 
-Not covered by this record: CI on Linux and on Node 22.19.0 and 24.x has not run this change yet. No model was called, no real Raft server or bridge was used, and the composition with a slice build that admits 0.2.1 was not checked here.
+Not covered by this record: CI on Linux and on Node 22.19.0 and 24.x has not run this change yet. No model was called and no real Raft server or bridge was used. The slice 0.3.0 build in the cutover table is a pre-release pack; repeat those rows with the released tarball before the switch. Adding a plugin while the host runs was not tested.
 
 ## Deploying this build
 
@@ -116,7 +131,7 @@ Not covered by this record: CI on Linux and on Node 22.19.0 and 24.x has not run
 - **Or put 0.1.2 in ahead of the window.** 0.1.2 can be added with the 0.2.0-rc.2 CLI in a separate stop and start on 0.2.0-rc.2. Next to slice 0.2.0 it composes on 0.2.0-rc.2 and passes the launcher's checks, and `plugin add` prints no warning. The 0.2.1 window then only has to cover slice and the host switch. These orders were checked with `--dump-config`; adding a plugin while the host runs was not tested.
 - **Fixing raft-channel alone is not enough.** On 0.2.1-rc.2 the host skips slice 0.2.0 (`dsh: skipping profile bundle "@dsh-external/dsh-slice-agent-loop": … requirements {…}`), so the deployment launcher exits 78 on every start, the supervisor keeps restarting it with a backoff that grows to 300 s, and the agent stays offline in Raft. A start that bypasses the launcher would run without the context policy.
 - **Back up session data first.** Save `<DSH_HOME>/sessions` and `<DSH_HOME>/raft-channel/<profile>.json` before the first start on 0.2.1. Without them, a rollback starts a new Raft session (see [Session data across hosts](#session-data-across-hosts)).
-- **The launcher's checks still hold.** The deployment launcher refuses to start the host unless `--dump-config` exits 0, its output contains neither `skipping profile bundle` nor `disabling profile plugin`, and each plugin row appears as `- id: <row>` at column 0. These strings are unchanged at both tags (`packages/boot/app-boot/src/profile.ts:120` and `compatibility-preflight.ts:82`), and the 0.2.1 dump prints rows in the same form. The admission runs above show the check passing for 0.1.2 on both hosts and catching 0.1.1 on 0.2.1. Only the launcher's host default and its comment name 0.2.0-rc.2. They change when the 0.2.1 host is installed next to the old one.
+- **The launcher's checks still hold.** The deployment launcher refuses to start the host unless `--dump-config` exits 0, its output contains neither `skipping profile bundle` nor `disabling profile plugin`, and each plugin row appears as `- id: <row>` at column 0. These strings are unchanged at both tags (`packages/boot/app-boot/src/profile.ts:120` and `compatibility-preflight.ts:82`), and the 0.2.1 dump prints rows in the same form. The admission runs above show the check passing for 0.1.2 on both hosts and catching 0.1.1 on 0.2.1, and the cutover table shows it catching a profile where only one of the two plugins was replaced. Only the launcher's host default and its comment name 0.2.0-rc.2. They change when the 0.2.1 host is installed next to the old one.
 - **Decide the composition before the switch.** On 0.2.1 the agent gains `working_directory` and the `schedule_*` tools, and clock readings in its history. A profile patch can disable `tool-working-directory`. `time-context` and `tool-schedule` live inside the preset configuration, so a top-level row override does not reach them.
 - **After the start,** check the host's stderr log for `skipping profile bundle` and `disabling profile plugin`, and check that Raft shows the agent online after the first wake.
 
