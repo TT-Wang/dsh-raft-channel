@@ -77,6 +77,47 @@ These are host composition changes. None of them needs a plugin change. The figu
 - **Back (0.2.1 to 0.2.0).** 0.2.1 writes `job/registered` and `job/settled` events for every shell call, foreground calls included. These events are not marked ignorable, and 0.2.0-rc.2 refuses a log with event types it does not know. In the investigation smoke, a home that had run one wake turn on 0.2.1-rc.2 was started on 0.2.0-rc.2. The plugin logged `raft-channel: cannot resume raft-probe-1 (session "raft-probe-1" contains event type "job/registered" (seq 19) unknown to this harness and not marked ignorable; …); continuing in a new session`, created `raft-probe-2` and queued a fresh wake notice. The turn then completed. The plugin did what its resume rules say for an unreadable session; no code change is needed. The old session stays on disk and opens again on 0.2.1.
 - **What to do.** Before the first start on 0.2.1, back up `<DSH_HOME>/sessions` and `<DSH_HOME>/raft-channel/<profile>.json`. A rollback that must keep the agent's history restores both and loses the turns run on 0.2.1. A raft rotation on 0.2.1 creates sessions that 0.2.0 cannot open either.
 
+## Verification recorded on 2026-10-22
+
+Machine: macOS 26.5 arm64, Node 22.22.3, pnpm 11.7.0. Plugin: version 0.1.2 at commit `12e39ad`. This section was added in the next commit, which changes only this file. Every type check and test run below ran under `sandbox-exec` with reads of the scratch directory's ancestor `node_modules` denied, so no package could load from an older copy (see [Before the next host bump](#before-the-next-host-bump)).
+
+| Check | Host | Result |
+| --- | --- | --- |
+| CI job `published-dsh`, replayed from a fresh clone: `pnpm install --frozen-lockfile`, `pnpm peers check`, `typecheck`, tests, rebuild and `lib/` drift check | published 0.2.1-rc.2 packages | all passed; **126 passed, 2 skipped across 11 files** (the skips are the opt-in live-bridge tests); `No peer dependency issues found`; rebuilt `lib/` identical to the committed files |
+| CI job `previous-dsh`, replayed from a fresh clone: DSH devDependencies repointed, `pnpm install --no-frozen-lockfile`, `pnpm peers check`, `typecheck`, tests | published 0.2.0-rc.2 packages, cordis 4.0.5 | all passed; **126 passed, 2 skipped across 11 files**; a rebuild there also reproduced the committed `lib/` |
+| Same test suite on Node 25.6.0 (not a CI node) | published 0.2.1-rc.2 packages | 126 passed, 2 skipped |
+| Pins moved, test harness unchanged | published 0.2.1-rc.2 packages | TS2307 for the three invariant imports and TS1192 for the JSONL default import; 8 of 11 spec files failed to load, 16 tests ran |
+| `npm pack` | n/a | `dsh-external-dsh-raft-channel-0.1.2.tgz`, 25 files, 65.5 kB packed, 209.1 kB unpacked, SHA-256 `023765184b9f1fa6ae3a0973f0f46be61385176b73908bcdaea50b56665896cf` |
+
+The digest identifies this build only. A change to `lib/`, `package.json`, a README or `LICENSE` changes it; this file is not in the tarball.
+
+Admission was checked with `dsh plugin --profile raft-admit add <tarball>` followed by `dsh --profile raft-admit --dump-config`, in a new scratch `DSH_HOME` per run. The profile mirrored the live one: bundles `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app`, `nodeLinker: hoisted`, `autoInstallPeers: false`, an empty `cordis.patch.yml`. The profile was never started. The 0.2.1-rc.2 CLI came from `npm install @deepseek-ai/dsh@0.2.1-rc.2` in a scratch directory. The 0.2.0-rc.2 CLI was the live deployment's own host binary, run with the scratch `DSH_HOME`; no file under that host directory changed.
+
+| Build | Host CLI | `plugin add` | `--dump-config` |
+| --- | --- | --- | --- |
+| 0.1.2 | 0.2.1-rc.2 | exit 0, installed 0.1.2 | exit 0, empty stderr, one `- id: raft-channel` row (191 top-level rows) |
+| 0.1.2 | 0.2.0-rc.2 | exit 0, installed 0.1.2 | exit 0, empty stderr, one `- id: raft-channel` row (184 top-level rows) |
+| 0.1.1 | 0.2.1-rc.2 | exit 1, `installation rejected: … requirements {…}`, profile restored | exit 0, empty stderr, no row |
+| 0.1.1, installed with the 0.2.0-rc.2 CLI | 0.2.1-rc.2 (start only) | n/a | exit 0, no row, one `skipping profile bundle "@dsh-external/dsh-raft-channel"` line |
+| 0.1.2 over that 0.1.1 install | 0.2.1-rc.2 | exit 0, installed 0.1.2, still one bundle entry | exit 0, empty stderr, one row |
+
+For each dump the live launcher's checks (described under [Deploying this build](#deploying-this-build)) were applied to the raft-channel row. Both 0.1.2 runs and the upgraded profile pass. The 0.1.1 profile started on 0.2.1 fails on the `skipping profile bundle` line, which is the path where the launcher exits 78.
+
+No release-age exemption was needed. `minimumReleaseAgeExclude` is empty, and every install above ran with `minimumReleaseAge: 1440`.
+
+The figures in [What the agent sees on 0.2.1](#what-the-agent-sees-on-021) and [Session data across hosts](#session-data-across-hosts) come from the investigation smoke runs on the same day. They used the same source and lib, with the peer list `0.1.7-rc.2 || 0.2.0-rc.2 || 0.2.1-rc.2` under version 0.1.2. They were not repeated for this record, because they start the profile.
+
+Not covered by this record: CI on Linux and on Node 22.19.0 and 24.x has not run this change yet. No model was called, no real Raft server or bridge was used, and the composition with a slice build that admits 0.2.1 was not checked here.
+
+## Deploying this build
+
+- **Install under the new name and version.** `npm pack` names this build `dsh-external-dsh-raft-channel-0.1.2.tgz`. Re-adding a tarball whose `name@version` is already installed does not replace the installed files. Installing 0.1.2 over 0.1.1 replaces them; the last row of the admission table checked that with the 0.2.1-rc.2 CLI. Keep the 0.1.1 tarball as a fallback. A host rollback does not need it, because 0.1.2 also admits 0.2.0-rc.2.
+- **Install both plugins in one stopped window.** The live profile also carries dsh-slice-agent-loop 0.2.0, whose range stops at 0.2.0-rc.2. Stop the host, add 0.1.2 and a slice build that admits 0.2.1-rc.2 with the 0.2.1-rc.2 CLI and `DSH_HOME` set to the deployment's home, switch the host, then start. Fixing raft-channel alone still leaves the deployment without its context policy on 0.2.1.
+- **Back up session data first.** Save `<DSH_HOME>/sessions` and `<DSH_HOME>/raft-channel/<profile>.json` before the first start on 0.2.1. Without them, a rollback starts a new Raft session (see [Session data across hosts](#session-data-across-hosts)).
+- **The launcher's checks still hold.** The deployment launcher refuses to start the host unless `--dump-config` exits 0, its output contains neither `skipping profile bundle` nor `disabling profile plugin`, and each plugin row appears as `- id: <row>` at column 0. These strings are unchanged at both tags (`packages/boot/app-boot/src/profile.ts:120` and `compatibility-preflight.ts:82`), and the 0.2.1 dump prints rows in the same form. The admission runs above show the check passing for 0.1.2 on both hosts and catching 0.1.1 on 0.2.1. Only the launcher's host default and its comment name 0.2.0-rc.2. They change when the 0.2.1 host is installed next to the old one.
+- **Decide the composition before the switch.** On 0.2.1 the agent gains `working_directory` and the `schedule_*` tools, and clock readings in its history. A profile patch can disable `tool-working-directory`. `time-context` and `tool-schedule` live inside the preset configuration, so a top-level row override does not reach them.
+- **After the start,** check the host's stderr log for `skipping profile bundle` and `disabling profile plugin`, and check that Raft shows the agent online after the first wake.
+
 ## Before the next host bump
 
 Do the same steps in one change: move the `@deepseek-ai/dsh-*` peers and devDependencies, check the cordis peer ranges of the new packages against the cordis devDependencies with `pnpm peers check`, regenerate the lockfile in place, rename the two CI jobs and repoint the second one, update `minimumReleaseAgeExclude` if the release is under a day old, bump `version`, and update both READMEs and this kind of note. `tests/manifest.spec.ts` fails when the installed DSH version is missing from the peer list, in both CI jobs. Packages that upstream removes show up as `ERR_MODULE_NOT_FOUND` or `ERR_PACKAGE_PATH_NOT_EXPORTED` in the test run.
